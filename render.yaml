@@ -1,0 +1,57 @@
+databases:
+  - name: matiz-db
+    plan: basic-256mb
+    postgresMajorVersion: "16"
+
+services:
+  - type: web
+    name: matiz-pm-tool
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --threads 8 --timeout 120 --bind 0.0.0.0:$PORT server:app
+    healthCheckPath: /health
+    # One worker is deliberate: the app keeps some in-process state (e.g.
+    # "typing..." indicators). Scale with threads, not workers. The actual
+    # data lives in Postgres, so this is safe even with several workers if
+    # you later decide you need them for throughput.
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.6
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: matiz-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: TRUST_PROXY
+        value: "true"
+      - key: TZ
+        value: Asia/Kolkata   # keeps stored timestamps and session expiry on IST; change or remove for UTC
+      # Secrets are entered in the Render dashboard, never committed here.
+      - key: INITIAL_ADMIN_PASSWORD
+        sync: false
+      - key: APP_BASE_URL
+        sync: false
+      - key: GMAIL_USER
+        sync: false
+      - key: GMAIL_APP_PASSWORD
+        sync: false
+      # Gmail API (required on Render's free plan, which blocks SMTP) - see README "GMAIL API"
+      - key: GMAIL_CLIENT_ID
+        sync: false
+      - key: GMAIL_CLIENT_SECRET
+        sync: false
+      - key: GMAIL_REFRESH_TOKEN
+        sync: false
+      - key: DEFAULT_FROM_EMAIL
+        sync: false
+      - key: DEFAULT_TO_EMAIL
+        sync: false
+      # Optional: Help -> Ask AI uses an AI model when a key is set (OpenAI by
+      # default; for DeepSeek also set HELP_AI_BASE_URL=https://api.deepseek.com
+      # and HELP_AI_MODEL=deepseek-chat). Without a key it uses its built-in answers.
+      - key: HELP_AI_API_KEY
+        sync: false
