@@ -133,3 +133,16 @@ REFERRAL = A FULL CLIENT  (+ Add referral opens the normal Add Client form)
     filled, and the client takes that referral's existing ID (e.g. CL-1001-RF4).
   * Who: BDC (own leads), Marketing TL, Marketing Manager, MD / Admin, Super Admin.
   FILES CHANGED: server.py, index.html
+
+
+REFERRAL CLIENT TAKING ANOTHER SERVICE  (no phone / email needed)
+=================================================================
+  Problem: client B (CL-1255-RF1) took a 2nd service and "+ Add referral" made a NEW
+  referral CL-1255-RF2 for the same person, because B has no phone / email to match on.
+  Fix: the Client ID is the key. "+ Add referral" now asks first:
+        ( ) New person                                   -> new referral ID (CL-1255-RF2)
+        ( ) Another work for [B — CL-1255-RF1 (1 work)]  -> saved as CL-1255-RF1-S2
+  "Another work" fills in B's details and keeps the same Client ID, exactly like a normal
+  client's 2nd work (work 2 of 2). No phone / email needed. The referral window also has
+  a "+ Another work for B" button that opens the form with B already picked.
+  FILES CHANGED: server.py, index.html

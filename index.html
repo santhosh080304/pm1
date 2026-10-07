@@ -9258,7 +9258,11 @@ function admOpenReferral(id){
         <div class="adm-panel-head"><h3>Projects</h3><span class="badge b-purp">${t.count}</span></div>
         <div class="adm-table-wrap"><table class="adm-table">${FAMILY_PROJECTS_HEAD}<tbody>${t.rows}</tbody></table></div>
       </div>
-      ${first ? `<div style="margin-top:10px"><button class="btn ghost small" onclick="${modern?`closeModal();admOpenClientProfile(${jsq(first.id)})`:`closeModal();openDrawer(${jsq(first.id)})`}">Open client profile &#8594;</button></div>` : ""}`
+      ${first ? `<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn ghost small" onclick="${modern?`closeModal();admOpenClientProfile(${jsq(first.id)})`:`closeModal();openDrawer(${jsq(first.id)})`}">Open client profile &#8594;</button>
+        ${canEdit && canAddClient() ? `<button class="btn small" onclick="closeModal();openAddClient({referrerId:${jsq(r.client_id)}, anotherWorkOf:${jsq(r.linked_client)}})">+ Another work for ${esc(r.name)}</button>` : ""}
+      </div>` : ""}
+`
       : `<p style="font-size:13px;color:var(--muted);margin-top:12px">Registered as <b>${esc(r.linked_client)}</b> — their projects aren't on your dashboard yet.</p>`;
     // A referral registered through "+ Add referral" IS that client (same ID) - nothing to unlink.
     if(canEdit && r.linked_client !== r.ref_code) body += `<p style="font-size:12px;color:var(--muted);margin-top:10px">Wrong person?
@@ -12800,13 +12804,54 @@ function nextReferralCodePreview(referrerId){
     .forEach(v=>{ if(v.startsWith(pre)){ const m = /^(\d+)(?:-S\d+)?$/.exec(v.slice(pre.length)); if(m) n = Math.max(n, parseInt(m[1],10)); } });
   return pre + (n + 1);
 }
+// Top of the referral form: "New person" or "Another work for <existing referral>".
+function referralModeChooserHtml(referrerId, selectedFam){
+  const referrer = findClient(referrerId);
+  if(!referrer) return "";
+  const linked = familyReferrals(referrer).filter(r=>r.linked_client);
+  if(!linked.length) return "";
+  const opts = linked.map(r=>{
+    const n = clients.filter(x=>clientFamilyId(x)===r.linked_client).length;
+    return `<option value="${esc(r.linked_client)}" ${selectedFam===r.linked_client?"selected":""}>${esc(r.name)} — ${esc(r.linked_client)} (${n} work${n===1?"":"s"})</option>`;
+  }).join("");
+  // The app's global input/select styles make every control full-width, so the radios
+  // and the select get explicit sizes here.
+  const radio = `style="width:16px;height:16px;flex:none;margin:0;padding:0"`;
+  const rowSt = `display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin:0 0 8px`;
+  return `<div class="sec" style="margin:4px 0 14px;padding:12px 14px">
+    <div style="font-weight:700;font-size:13px;margin-bottom:10px">Is this a new person, or another service for someone already referred?</div>
+    <div style="${rowSt}" onclick="${selectedFam?`openAddClient({referrerId:${jsq(referrerId)}})`:""}">
+      <input type="radio" name="f_refmode" ${selectedFam?"":"checked"} ${radio}>
+      <span><b>New person</b> — gets a new referral ID</span></div>
+    <div style="${rowSt};flex-wrap:wrap">
+      <input type="radio" name="f_refmode" ${selectedFam?"checked":""} ${radio}
+        onclick="const v=$('f_refExisting').value; if(v) openAddClient({referrerId:${jsq(referrerId)}, anotherWorkOf:v}); else $('f_refExisting').focus();">
+      <span><b>Another work for</b></span>
+      <select id="f_refExisting" style="width:auto;min-width:240px;max-width:100%;flex:1 1 240px" onchange="if(this.value) openAddClient({referrerId:${jsq(referrerId)}, anotherWorkOf:this.value})">
+        ${selectedFam?"":`<option value="">— pick the person —</option>`}${opts}</select></div>
+    <p style="font-size:11.5px;color:var(--muted);margin:2px 0 0">Another work keeps the same Client ID (e.g. CL-1255-RF1 &rarr; CL-1255-RF1-S2), so no phone or email is needed to match them.</p>
+  </div>`;
+}
 function openAddClient(opts){
   opts = opts || {};
   addClientInstallments = [];
   addClientCtx = {};
   const today = new Date().toISOString().slice(0,10);
-  let refInfo = null;
-  if(opts.referrerId){
+  let refInfo = null, anotherWork = null;
+  // "Another work for an existing referral": NOT a new referral - saved as the next work
+  // under that person's Client ID (CL-1255-RF1 -> CL-1255-RF1-S2). The Client ID is the
+  // key here, so it works without phone / email.
+  if(opts.referrerId && opts.anotherWorkOf){
+    const referrer = findClient(opts.referrerId);
+    const works = clients.filter(x=>clientFamilyId(x)===opts.anotherWorkOf);
+    const first = works.slice().sort((a,b)=>a.id.length-b.id.length)[0];
+    anotherWork = {fam: opts.anotherWorkOf, n: works.length + 1, person: first,
+                   referrerId: opts.referrerId, referrerName: referrer ? referrer.name : "", referrerFam: clientFamilyId(referrer)};
+    addClientCtx.familyOf = opts.anotherWorkOf;
+    addClientCtx.familyHasPhone = works.some(x=>x.phone);
+    addClientCtx.anotherWork = anotherWork;
+  }
+  else if(opts.referrerId){
     const referrer = findClient(opts.referrerId);
     const r = opts.referralId ? clientReferrals.find(x=>x.id===opts.referralId) : null;
     refInfo = {referrerId: opts.referrerId, referralId: opts.referralId || null,
@@ -12814,12 +12859,17 @@ function openAddClient(opts){
                referrerName: referrer ? referrer.name : "", referrerFam: clientFamilyId(referrer)};
     addClientCtx.referral = refInfo;
   }
-  const hideLookup = isAdminModern() || !!refInfo;
-  const optTag = refInfo ? ' <span style="text-transform:none;font-weight:500;color:var(--muted)">(optional)</span>' : "";
+  const hideLookup = isAdminModern() || !!refInfo || !!anotherWork;
+  const phoneOpt = !!refInfo || (!!anotherWork && !addClientCtx.familyHasPhone);
+  const optTag = phoneOpt ? ' <span style="text-transform:none;font-weight:500;color:var(--muted)">(optional)</span>' : "";
+  const refCtx = refInfo || anotherWork;
   openModal(`
-    <h3>${refInfo ? "Add referral client" : "Add client"}</h3><p class="msub">${refInfo
+    <h3>${anotherWork ? "Another work for a referral client" : (refInfo ? "Add referral client" : "Add client")}</h3><p class="msub">${anotherWork
+      ? `<b>${esc(anotherWork.person ? anotherWork.person.name : "")}</b> (${esc(anotherWork.fam)}) &bull; will be saved as <b>${esc(anotherWork.fam)}-S${anotherWork.n}</b> — work ${anotherWork.n} of ${anotherWork.n}, same Client ID`
+      : refInfo
       ? `Referred by <b>${esc(refInfo.referrerName)}</b> (${esc(refInfo.referrerFam)}) &bull; Client ID will be <b>${esc(refInfo.code)}</b> &bull; phone and email are optional`
       : (hideLookup ? "Register a new lead" : "Register a new lead — or look up an existing client to add another work for them")}</p>
+    ${refCtx ? referralModeChooserHtml(refCtx.referrerId, anotherWork ? anotherWork.fam : "") : ""}
     ${hideLookup ? "" : `
     <div class="field">
       <label>Existing client? Look up by phone or client ID</label>
@@ -12832,7 +12882,7 @@ function openAddClient(opts){
     <h4 class="am-section-head">Project Information</h4>
     <div class="grid2">
       <div class="field"><label>Client name *</label><input id="f_name" placeholder="Full name"></div>
-      <div class="field"><label>Phone${refInfo ? optTag : " *"}</label><input id="f_phone" type="tel" inputmode="numeric" maxlength="10" placeholder="10-digit number" onkeydown="blockNonDigitKey(event)" oninput="digitsOnlyInput(this,10);autoFillFromPhoneOrEmail()"></div>
+      <div class="field"><label>Phone${phoneOpt ? optTag : " *"}</label><input id="f_phone" type="tel" inputmode="numeric" maxlength="10" placeholder="10-digit number" onkeydown="blockNonDigitKey(event)" oninput="digitsOnlyInput(this,10);autoFillFromPhoneOrEmail()"></div>
       <div class="field"><label>Email${optTag}</label><input id="f_email" type="email" placeholder="client@email.com" oninput="autoFillFromPhoneOrEmail()"></div>
       <div class="field" style="grid-column:1/-1"><div id="f_autoMatchResult"></div></div>
       <div class="field"><label>Registration date</label><input id="f_reg" type="date" value="${today}"></div>
@@ -12857,7 +12907,7 @@ function openAddClient(opts){
       <div class="field"><label>Institutional email</label><input id="f_instEmail" placeholder="Optional college/company email"></div>
       <div class="field"><label>Department</label><input id="f_department" placeholder="e.g. CSE, ECE"></div>
       <div class="field"><label>Referred by</label><input id="f_referredBy" placeholder="Optional — who referred this client"
-        ${refInfo ? `value="${esc(refInfo.referrerFam + " (" + refInfo.referrerName + ")")}" readonly style="opacity:.75"` : ""}></div>
+        ${refCtx ? `value="${esc(refCtx.referrerFam + " (" + refCtx.referrerName + ")")}" readonly style="opacity:.75"` : ""}></div>
       <div class="field" style="grid-column:1/-1"><label>Notes</label><textarea id="f_notes" rows="2" placeholder="Anything from the conversation"></textarea></div>
     </div>
     <h4 class="am-section-head">Payment Information</h4>
@@ -12877,7 +12927,14 @@ function openAddClient(opts){
         <div id="f_installmentBox"></div>
       </div>
     </div>
-    <div class="modal-actions"><button class="btn ghost" onclick="closeModalIfConfirmed()">Cancel</button><button class="btn" onclick="addClient()">${refInfo ? "Save referral client" : "Save client"}</button></div>`);
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModalIfConfirmed()">Cancel</button><button class="btn" onclick="addClient()">${anotherWork ? "Save work " + anotherWork.n : (refInfo ? "Save referral client" : "Save client")}</button></div>`);
+  if(anotherWork && anotherWork.person){
+    const pp = anotherWork.person;
+    $("f_name").value = pp.name || "";
+    $("f_phone").value = pp.phone || ""; $("f_email").value = pp.email || "";
+    $("f_addr").value = pp.address || ""; $("f_designation").value = pp.designation || "";
+    $("f_institution").value = pp.institution || ""; $("f_department").value = pp.department || "";
+  }
   if(opts.name && $("f_name")) $("f_name").value = opts.name;
   if(opts.designation && $("f_designation")) $("f_designation").value = opts.designation;
   if(opts.phone && $("f_phone")) $("f_phone").value = opts.phone;
@@ -13070,6 +13127,7 @@ async function addClient(){
   }catch(e){ toast(`${name} added, but the payment proof couldn't be attached: ` + e.message); }
   closeModal(); await refresh();
   toast(out.refCode ? `${name} added as referral client ${out.id} — project ${out.projectId}`
+       : addClientCtx.anotherWork ? `${name} — another work saved as ${out.id} (Client ID ${out.displayId}), project ${out.projectId}`
                     : `${name} added — client ID ${out.id}, project ${out.projectId} (share it for their login)`);
   addClientCtx = {};
   if(addClientInstallments.length){
