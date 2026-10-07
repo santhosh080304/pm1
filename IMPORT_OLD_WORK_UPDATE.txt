@@ -42,3 +42,25 @@ ALSO FIXED
   Invalid Alternate Mobile is flagged. Help assistant text updated.
 
 FILES CHANGED: server.py, index.html, help_assistant.py
+
+
+SERVICE COLUMN + FILTER  (Clients / Projects / Client profile)
+==============================================================
+Roles: Super Admin, MD / Admin, Marketing Manager, Marketing TL, Technical Manager,
+       Technical TL, Journal Manager.
+
+  * Clients table          -> new "Service" column after Project Name, with a filter.
+  * Projects > Overview    -> new "Service" column with the same filter
+                              (Admin, Marketing Manager, Technical Manager/TL, Journal Manager).
+  * Projects > New Projects-> the Service Type column is now filterable.
+  * Client profile > Projects tab -> new "Service" column (+ Project ID under the code), so a
+                              client's 2nd / 3rd work shows its own service.
+  * Marketing TL > All clients    -> new "Service" column with the same filter.
+
+  The filter lists every service (SCI, Scopus Paid, EPORS, Synopsis, Survey Synopsis,
+  100 Page Thesis) with how many rows use it; tick one or several, Clear to reset.
+  The selection is shared, so filtering Clients by SCI also filters Projects; a
+  "Service filter: ... x Clear" strip above the table shows what is active.
+  Service is also in the Search box and in the Clients / Projects Export (.csv).
+
+  FILE CHANGED: index.html

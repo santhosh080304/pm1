@@ -7671,10 +7671,10 @@ function renderAdminClients(){
 }
 function admExportClientsCsv(){
   const rows = scopedClientsForCurrentView().filter(matchesAdminColSearch);
-  const head = ["Client ID","Client Name","Project Name","Email","Registered Date","BDC","Works","Status"];
+  const head = ["Client ID","Client Name","Project Name","Service","Email","Registered Date","BDC","Works","Status"];
   const lines = [head.join(",")].concat(rows.map(c=>{
     const st = admClientStatus(c);
-    return [c.displayId||c.id, c.name, c.domain||c.topic||"", c.email||"", fmtDate(admClientRegDate(c)), c.bdc||"", `${admWorkPosition(c)} of ${admWorksCount(c)}`, st.label]
+    return [c.displayId||c.id, c.name, c.domain||c.topic||"", c.serviceKey ? serviceLabel(c) : "", c.email||"", fmtDate(admClientRegDate(c)), c.bdc||"", `${admWorkPosition(c)} of ${admWorksCount(c)}`, st.label]
       .map(v=>`"${String(v==null?"":v).replace(/"/g,'""')}"`).join(",");
   }));
   const blob = new Blob([lines.join("\n")], {type:"text/csv"});
@@ -7692,10 +7692,12 @@ function matchesAdminColSearch(c){
   if(s.works && !String(admWorksCount(c)).includes(s.works.trim())) return false;
   if(admBdcFilterSel.length && !admBdcFilterSel.includes((c.bdc||"").trim())) return false;
   if(admStatusFilterSel.length && !admStatusFilterSel.includes(st.label)) return false;
+  if(!matchesServiceFilter(c)) return false;
   if(searchQuery){
     const q = searchQuery.trim().toLowerCase();
     const hay = ((c.name||"")+" "+(c.phone||"")+" "+(c.id||"")+" "+(c.displayId||"")+" "+(c.email||"")+" "
-      +(c.domain||"")+" "+(c.topic||"")+" "+(c.bdc||"")+" "+fmtDate(admClientRegDate(c))+" "+st.label).toLowerCase();
+      +(c.domain||"")+" "+(c.topic||"")+" "+(c.bdc||"")+" "+fmtDate(admClientRegDate(c))+" "+st.label+" "
+      +serviceShortName(c.serviceKey)+" "+serviceLabel(c)).toLowerCase();
     if(!hay.includes(q)) return false;
   }
   return true;
@@ -7808,14 +7810,88 @@ function admThMultiFilter(label, key, options, sel, toggleFnName, clearFnName){
     ${icon}<span class="adm-th-row-plain" style="cursor:pointer">${esc(label)}</span>${count?`<span class="adm-filter-badge">${count}</span>`:""}
   </span>${pop}</th>`;
 }
+/* ---------- SERVICE column + filter ----------
+   Shown on the Clients table, the Projects tables (Overview / New Projects), the client
+   profile's Projects tab and the "All clients" list (Marketing TL), for Super Admin,
+   MD / Admin, Marketing Manager, Marketing TL, Technical Manager / TL and Journal Manager.
+   One shared selection, so picking "SCI" on Clients also narrows Projects - the filter
+   badge on the column header always shows how many services are selected. Options are
+   every service the tool offers (not hardcoded here - from the server's service list),
+   each with how many of the rows in view use it. */
+const SERVICE_SHORT = {SCI:"SCI", SCOPUS_PAID:"Scopus Paid", SCOPUS_NO_IMPL:"EPORS", SYNOPSIS:"Synopsis",
+  SURVEY_SYNOPSIS:"Survey Synopsis", THESIS_100:"100 Page Thesis"};
+const SERVICE_NONE = "__none__";
+let admServiceFilterSel = [];   // selected service keys (SERVICE_NONE = no service set)
+function serviceShortName(key){
+  if(!key) return "—";
+  return SERVICE_SHORT[key] || (services[key] && services[key].label) || key;
+}
+function serviceCellHtml(c){
+  const k = c && c.serviceKey;
+  if(!k) return `<span style="color:var(--muted)">—</span>`;
+  const full = (services[k] && services[k].label) || k;
+  return `<span class="badge b-dim" title="${esc(full)}" style="white-space:nowrap">${esc(serviceShortName(k))}</span>`;
+}
+function matchesServiceFilter(c){
+  if(!admServiceFilterSel.length) return true;
+  return admServiceFilterSel.includes((c && c.serviceKey) || SERVICE_NONE);
+}
+function admToggleServiceFilterVal(key){
+  const i = admServiceFilterSel.indexOf(key);
+  if(i>=0) admServiceFilterSel.splice(i,1); else admServiceFilterSel.push(key);
+  rerenderCurrent();
+}
+function admClearServiceFilter(){ admServiceFilterSel = []; rerenderCurrent(); }
+// Column header with the filter popover. baseList = the rows this table would show with
+// every OTHER filter applied, used only for the per-service counts.
+function admThServiceFilter(baseList, popKey){
+  popKey = popKey || "service";
+  const icon = `<svg class="adm-th-icon" viewBox="0 0 20 20" fill="none"><path d="M3 4.5h14l-5.3 6.2V16l-3.4-1.8v-3.5L3 4.5z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+  const counts = {};
+  (baseList||[]).forEach(c=>{ const k = c.serviceKey || SERVICE_NONE; counts[k] = (counts[k]||0) + 1; });
+  const keys = Object.keys(services||{});
+  Object.keys(counts).forEach(k=>{ if(k!==SERVICE_NONE && !keys.includes(k)) keys.push(k); });
+  if(counts[SERVICE_NONE]) keys.push(SERVICE_NONE);
+  const open = !!admMultiFilterOpen[popKey];
+  const sel = admServiceFilterSel;
+  const pop = open ? `<div class="adm-filter-pop" onclick="event.stopPropagation()" style="min-width:230px;max-height:none">
+      <div class="adm-filter-pop-list" style="max-height:320px">
+        ${keys.map(k=>`<label class="adm-filter-opt" title="${esc(k===SERVICE_NONE?"No service set":((services[k]&&services[k].label)||k))}">
+            <input type="checkbox" ${sel.includes(k)?'checked':''} onchange="admToggleServiceFilterVal(${jsq(k)})">
+            <span style="flex:1">${esc(k===SERVICE_NONE?"No service set":serviceShortName(k))}</span>
+            <span style="color:var(--muted);font-size:11px">${counts[k]||0}</span></label>`).join("")}
+      </div>
+      <div class="adm-filter-pop-actions">
+        <button type="button" class="adm-filter-clear" onclick="admClearServiceFilter()">Clear</button>
+        <button type="button" class="adm-filter-done" onclick="admToggleMultiFilter(${jsq(popKey)})">Done</button>
+      </div>
+    </div>` : "";
+  return `<th style="position:relative"><span class="adm-th-row adm-th-trigger" onclick="event.stopPropagation();admToggleMultiFilter(${jsq(popKey)})" title="Filter by service">
+    ${icon}<span class="adm-th-row-plain" style="cursor:pointer">Service</span>${sel.length?`<span class="adm-filter-badge">${sel.length}</span>`:""}
+  </span>${pop}</th>`;
+}
+// Small strip under a table head: "Showing: SCI, EPORS  x Clear" so nobody is surprised
+// by a filter they set on another page.
+function serviceFilterNoteHtml(){
+  if(!admServiceFilterSel.length) return "";
+  const names = admServiceFilterSel.map(k=>k===SERVICE_NONE?"No service set":serviceShortName(k)).join(", ");
+  return `<div style="padding:8px 18px;font-size:12.5px;color:var(--muted);border-bottom:1px solid var(--line)">
+    Service filter: <b style="color:var(--text)">${esc(names)}</b>
+    <button type="button" class="btn ghost small" style="margin-left:8px;padding:3px 10px" onclick="admClearServiceFilter()">&times; Clear</button></div>`;
+}
 function adminClientsTableHtml(){
   const list = scopedClientsForCurrentView().filter(matchesAdminColSearch);
+  // counts in the Service filter = rows with every other filter applied
+  const svcSave = admServiceFilterSel; admServiceFilterSel = [];
+  const svcBase = scopedClientsForCurrentView().filter(matchesAdminColSearch);
+  admServiceFilterSel = svcSave;
   const rows = list.map(c=>{
     const st = admClientStatus(c);
     return `<tr onclick="admOpenClientProfile(${jsq(c.id)})">
       <td><b>${c.displayId||c.id}</b></td>
       <td>${esc(c.name)}</td>
       <td>${esc(c.domain||c.topic||"—")}</td>
+      <td>${serviceCellHtml(c)}</td>
       <td>${esc(c.email||"—")}</td>
       <td>${fmtDate(admClientRegDate(c))}</td>
       <td>${esc(c.bdc||"—")}</td>
@@ -7842,18 +7918,20 @@ function adminClientsTableHtml(){
         <button class="btn ghost small" onclick="admExportClientsCsv()">Export</button>
       </div>
     </div>
+    ${serviceFilterNoteHtml()}
     <div class="adm-table-wrap">
       <table class="adm-table"><thead><tr>
         ${admThCol('Client ID','id')}
         ${admThCol('Client Name','name')}
         ${admThCol('Project Name','project')}
+        ${admThServiceFilter(svcBase, 'service-clients')}
         ${admThCol('Email','email')}
         ${admThCol('Registered Date','regdate')}
         ${admThMultiFilter('BDC','bdc', admBdcFilterOptions(), admBdcFilterSel, 'admToggleBdcFilterVal', 'admClearBdcFilter')}
         ${admThCol('Works','works')}
         ${admThMultiFilter('Status','status', admStatusFilterOptions(), admStatusFilterSel, 'admToggleStatusFilterVal', 'admClearStatusFilter')}
         ${admThPlain('Action')}
-      </tr></thead><tbody>${list.length ? rows : `<tr><td colspan="9"><div class="adm-empty">No clients match your search.</div></td></tr>`}</tbody></table>
+      </tr></thead><tbody>${list.length ? rows : `<tr><td colspan="10"><div class="adm-empty">No clients match your search.</div></td></tr>`}</tbody></table>
     </div>
   </div>`;
 }
@@ -8111,10 +8189,12 @@ function matchesAdminProjSearch(c){
   if(s.proj && !((c.domain||c.topic||"")).toLowerCase().includes(s.proj.toLowerCase())) return false;
   if(s.tech && !admTechStatusLabel(c).toLowerCase().includes(s.tech.toLowerCase())) return false;
   if(s.pub && !admPubStatusLabel(c).toLowerCase().includes(s.pub.toLowerCase())) return false;
+  if(!matchesServiceFilter(c)) return false;
   if(searchQuery){
     const q = searchQuery.trim().toLowerCase();
     const hay = ((c.name||"")+" "+(c.id||"")+" "+(c.displayId||"")+" "+(c.domain||"")+" "+(c.topic||"")+" "
-      +(c.bdc||"")+" "+fmtDate(admClientRegDate(c))+" "+admTechStatusLabel(c)).toLowerCase();
+      +(c.bdc||"")+" "+fmtDate(admClientRegDate(c))+" "+admTechStatusLabel(c)+" "
+      +serviceShortName(c.serviceKey)+" "+serviceLabel(c)).toLowerCase();
     if(!hay.includes(q)) return false;
   }
   return true;
@@ -8142,16 +8222,18 @@ function admNewProjectsTableHtml(scope){
   // handed over — never leads still with Marketing or sitting unconfirmed with Accounts.
   // Journal Manager's "New Projects" = journal-scope clients just handed over and still
   // waiting on a proofreading/formatting coordinator assignment.
-  const list = clients.filter(c=>!c.rejected)
+  const baseList = clients.filter(c=>!c.rejected)
     .filter(c=> scope==='tm' ? stageIdx(c.stage) > acctIdx
       : scope==='jm' ? ['JOURNAL_MANAGER_REVIEW','JOURNAL_MANAGER_FORMATTING'].includes(c.stage)
       : stageIdx(c.stage) <= acctIdx)
     .filter(matchesSearch);
+  const svcBase = baseList;
+  const list = baseList.filter(matchesServiceFilter);
   const rows = list.map(c=>`<tr onclick="admOpenProject(${jsq(c.id)})">
     <td><b>${esc(c.name)}</b></td>
     <td>${esc(c.projectId||"—")}</td>
     <td>${esc(c.domain||c.topic||"—")}</td>
-    <td>${esc((services[c.serviceKey]&&services[c.serviceKey].label)||c.serviceKey||"—")}</td>
+    <td>${serviceCellHtml(c)}</td>
     <td>${esc(c.domain||"—")}</td>
     <td>${admInstallmentsText(c)}</td>
     <td onclick="event.stopPropagation()">
@@ -8170,9 +8252,10 @@ function admNewProjectsTableHtml(scope){
       <div class="adm-search"><span>&#128269;</span><input id="universalSearchInput" placeholder="Search" value="${esc(searchQuery)}" oninput="handleSearchInput(this.value)"></div>
       <div style="display:flex;gap:8px"><button class="btn ghost small" onclick="admOpenBulkImport('clients')">Import</button><button class="btn ghost small" onclick="admExportProjectsCsv()">Export</button></div>
     </div>
-    <div class="adm-table-wrap">${list.length ? `<table class="adm-table"><thead><tr>
-      <th>Client Name</th><th>Proj. Code</th><th>Proj. Name</th><th>Service Type</th><th>Research Domain</th><th>Installments</th><th>Action</th>
-    </tr></thead><tbody>${rows}</tbody></table>` : `<div class="adm-empty">${scope==='tm' ? "Nothing new right now — nothing has been approved by Accounts and handed to the technical team yet." : "No new projects right now — everything has moved into the technical pipeline."}</div>`}</div>
+    ${serviceFilterNoteHtml()}
+    <div class="adm-table-wrap">${svcBase.length ? `<table class="adm-table"><thead><tr>
+      <th>Client Name</th><th>Proj. Code</th><th>Proj. Name</th>${admThServiceFilter(svcBase, 'service-newprojects')}<th>Research Domain</th><th>Installments</th><th>Action</th>
+    </tr></thead><tbody>${list.length ? rows : `<tr><td colspan="7"><div class="adm-empty">No new projects for the selected service.</div></td></tr>`}</tbody></table>` : `<div class="adm-empty">${scope==='tm' ? "Nothing new right now — nothing has been approved by Accounts and handed to the technical team yet." : "No new projects right now — everything has moved into the technical pipeline."}</div>`}</div>
   </div>`;
 }
 function admProjectBoardHtml(scope){
@@ -8258,10 +8341,10 @@ function admExportExtensionsCsv(){
   toast("Exported "+list.length+" extension requests");
 }
 function admExportProjectsCsv(){
-  const rows = scopedClientsForCurrentView().filter(matchesAdminProjSearch);
-  const head = ["Client Name","Proj. Name","Members","Start Date","Finish By","Technical Status","Publication Status","Installments"];
+  const rows = scopedClientsForCurrentView().filter(isMktModern() ? matchesMktProjSearch : matchesAdminProjSearch);
+  const head = ["Client Name","Proj. Name","Service","Members","Start Date","Finish By","Technical Status","Publication Status","Installments"];
   const lines = [head.join(",")].concat(rows.map(c=>[
-      c.name, c.domain||c.topic||"", [...(c.assignedProgrammers||[]),...(c.assignedWriters||[])].join("; "),
+      c.name, c.domain||c.topic||"", c.serviceKey ? serviceLabel(c) : "", [...(c.assignedProgrammers||[]),...(c.assignedWriters||[])].join("; "),
       fmtDate(admClientRegDate(c)), fmtDate(c.deadlineDate), admTechStatusLabel(c), admPubStatusLabel(c), admInstallmentsText(c)
     ].map(v=>`"${String(v==null?"":v).replace(/"/g,'""')}"`).join(",")));
   const blob = new Blob([lines.join("\n")], {type:"text/csv"});
@@ -8272,12 +8355,16 @@ function adminProjectsTableHtml(scope){
   const acctIdx = stageIdx("ACCOUNT_REVIEW");
   // Technical Manager/TL "Overview" must only list clients Accounts has confirmed — anything
   // still with Marketing (not sent to Accounts) or unconfirmed at Accounts must not appear here.
-  let list = clients.filter(matchesAdminProjSearch);
-  if(scope==='tm') list = list.filter(c=>!c.rejected && stageIdx(c.stage) > acctIdx);
-  else if(scope==='jm') list = list.filter(c=>!c.rejected && isJournalScope(c));
+  const scopeFilter = l => scope==='tm' ? l.filter(c=>!c.rejected && stageIdx(c.stage) > acctIdx)
+    : scope==='jm' ? l.filter(c=>!c.rejected && isJournalScope(c)) : l;
+  let list = scopeFilter(clients.filter(matchesAdminProjSearch));
+  const svcSave = admServiceFilterSel; admServiceFilterSel = [];
+  const svcBase = scopeFilter(clients.filter(matchesAdminProjSearch));
+  admServiceFilterSel = svcSave;
   const rows = list.map(c=>`<tr onclick="admOpenProject(${jsq(c.id)})">
     <td><b>${esc(c.name)}</b><br><small style="color:#8DA39A">${c.displayId||c.id}</small></td>
     <td>${esc(c.domain||c.topic||"—")}</td>
+    <td>${serviceCellHtml(c)}</td>
     <td>${admMembersHtml(c)}</td>
     <td>${fmtDate(admClientRegDate(c))}</td>
     <td>${fmtDate(c.deadlineDate)}</td>
@@ -8294,17 +8381,19 @@ function adminProjectsTableHtml(scope){
         <button class="btn ghost small" onclick="admExportProjectsCsv()">Export</button>
       </div>
     </div>
+    ${serviceFilterNoteHtml()}
     <div class="adm-table-wrap">
       <table class="adm-table"><thead><tr>
         ${admThCol('Client Name','client','admProjColSearch')}
         ${admThCol('Proj. Name','proj','admProjColSearch')}
+        ${admThServiceFilter(svcBase, 'service-projects')}
         ${admThPlain('Members')}
         ${admThPlain('Start Date')}
         ${admThPlain('Finish By')}
         ${admThCol('Technical Status','tech','admProjColSearch')}
         ${admThCol('Publication Status','pub','admProjColSearch')}
         ${admThPlain('Installments')}
-      </tr></thead><tbody>${list.length ? rows : `<tr><td colspan="8"><div class="adm-empty">No projects match this search.</div></td></tr>`}</tbody></table>
+      </tr></thead><tbody>${list.length ? rows : `<tr><td colspan="9"><div class="adm-empty">No projects match this search.</div></td></tr>`}</tbody></table>
     </div>
   </div>`;
 }
@@ -9066,13 +9155,14 @@ function admProfileProjectsTab(c){
   const fam = clients.filter(x=>(x.displayId||x.id)===(c.displayId||c.id));
   const rows = fam.map(x=>`<tr onclick="admOpenProject(${jsq(x.id)})">
     <td><b>${esc(x.domain||x.topic||"—")}</b></td>
-    <td>${x.displayId||x.id}</td>
+    <td>${serviceCellHtml(x)}</td>
+    <td>${x.displayId||x.id}${x.projectId?`<br><small style="color:var(--muted)">${esc(x.projectId)}</small>`:""}</td>
     <td>${fmtDate(admClientRegDate(x))}</td>
     <td>${fmtDate(x.deadlineDate)}</td>
     <td><span class="stage-chip ${chipClass(x.stage)}">${STAGE_LABEL[x.stage]}</span></td>
   </tr>`).join("");
   return `<div class="adm-panel"><div class="adm-panel-head"><h3>Projects</h3><span class="badge b-purp">${fam.length}</span></div>
-    <div class="adm-table-wrap"><table class="adm-table"><thead><tr><th>Project</th><th>Code</th><th>Start</th><th>Finish</th><th>Stage</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="adm-table-wrap"><table class="adm-table"><thead><tr><th>Project</th><th>Service</th><th>Code</th><th>Start</th><th>Finish</th><th>Stage</th></tr></thead><tbody>${rows}</tbody></table></div>
   </div>`;
 }
 function admProfileReferralsTab(c){
@@ -9301,9 +9391,11 @@ function matchesMktProjSearch(c){
   if(s.client && !((c.displayId||c.id)).toLowerCase().includes(s.client.toLowerCase())) return false;
   if(s.proj && !((c.domain||c.topic||"")).toLowerCase().includes(s.proj.toLowerCase())) return false;
   if(s.status && !admTechStatusLabel(c).toLowerCase().includes(s.status.toLowerCase())) return false;
+  if(!matchesServiceFilter(c)) return false;
   if(searchQuery){
     const q = searchQuery.trim().toLowerCase();
-    const hay = ((c.name||"")+" "+(c.id||"")+" "+(c.displayId||"")+" "+(c.domain||"")).toLowerCase();
+    const hay = ((c.name||"")+" "+(c.id||"")+" "+(c.displayId||"")+" "+(c.domain||"")+" "
+      +serviceShortName(c.serviceKey)+" "+serviceLabel(c)).toLowerCase();
     if(!hay.includes(q)) return false;
   }
   return true;
@@ -9330,10 +9422,14 @@ function mktProjectsCalendarHtml(){
 }
 function mktProjectsTableHtml(){
   const list = clients.filter(matchesMktProjSearch);
+  const svcSave = admServiceFilterSel; admServiceFilterSel = [];
+  const svcBase = clients.filter(matchesMktProjSearch);
+  admServiceFilterSel = svcSave;
   const rows = list.map(c=>`<tr onclick="admOpenProject(${jsq(c.id)})">
     <td><b>${c.displayId||c.id}</b></td>
     <td>${esc(c.projectId||"—")}</td>
     <td>${esc(c.domain||c.topic||"—")}</td>
+    <td>${serviceCellHtml(c)}</td>
     <td>${fmtDate(admClientRegDate(c))}</td>
     <td>${fmtDate(c.deadlineDate)}</td>
     <td>${esc(admTechStatusLabel(c))}</td>
@@ -9348,16 +9444,18 @@ function mktProjectsTableHtml(){
         <button class="btn ghost small" onclick="admExportProjectsCsv()">Export</button>
       </div>
     </div>
+    ${serviceFilterNoteHtml()}
     <div class="adm-table-wrap">
       <table class="adm-table"><thead><tr>
         ${admThCol('Client ID','client','mktProjColSearch')}
         ${admThPlain('Project Code')}
         ${admThCol('Project Name','proj','mktProjColSearch')}
+        ${admThServiceFilter(svcBase, 'service-mktprojects')}
         ${admThPlain('Start Date')}
         ${admThPlain('Finish By')}
         ${admThCol('Status','status','mktProjColSearch')}
         ${admThPlain('Installments Done')}
-      </tr></thead><tbody>${list.length ? rows : `<tr><td colspan="7"><div class="adm-empty">No projects match this search.</div></td></tr>`}</tbody></table>
+      </tr></thead><tbody>${list.length ? rows : `<tr><td colspan="8"><div class="adm-empty">No projects match this search.</div></td></tr>`}</tbody></table>
     </div>
   </div>`;
 }
@@ -10935,9 +11033,11 @@ async function saveChangePasswordAdmin(kind, key){
   toast("Password updated");
 }
 function allPipelinePanel(){
-  const list = clients.filter(matchesSearch);
+  const svcBase = clients.filter(matchesSearch);
+  const list = svcBase.filter(matchesServiceFilter);
   const rows = list.map(c=>`<tr onclick="openDrawer(${jsq(c.id)})" style="cursor:pointer">
     <td><div class="cl-name">${esc(c.name)}<small>${c.displayId||c.id} &bull; ${esc(c.domain||"")}</small> ${serviceFamilyBadgeHtml(c)}</div></td>
+    <td>${serviceCellHtml(c)}</td>
     <td>${esc(c.phone||"—")}</td>
     <td><small>${fmtDate(c.deadlineDate)}</small></td>
     <td><span class="stage-chip ${chipClass(c.stage)}">${STAGE_LABEL[c.stage]}</span></td>
@@ -10945,7 +11045,8 @@ function allPipelinePanel(){
     <td><small>${c.assignedWriters.join(", ")||"—"}</small></td>
   </tr>`).join("");
   return searchBarHtml() + sectionHead("All clients", list.length) + `<div class="panel">
-    <div class="tbl-wrap">${list.length?`<table><thead><tr><th>Client</th><th>Phone</th><th>Deadline</th><th>Stage</th><th>Programmers</th><th>Writers</th></tr></thead><tbody>${rows}</tbody></table>`
+    ${serviceFilterNoteHtml()}
+    <div class="tbl-wrap">${svcBase.length?`<table><thead><tr><th>Client</th>${admThServiceFilter(svcBase, 'service-pipeline')}<th>Phone</th><th>Deadline</th><th>Stage</th><th>Programmers</th><th>Writers</th></tr></thead><tbody>${list.length ? rows : `<tr><td colspan="7"><div class="empty">No clients for the selected service.</div></td></tr>`}</tbody></table>`
     :`<div class="empty"><span class="disp">No clients match</span>Try a different search or clear the stage filter.</div>`}</div>`;
 }
 
