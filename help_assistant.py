@@ -258,18 +258,27 @@ Telecaller: sidebar -> Add Client:
 - "Bulk import from a Google Sheet" - paste a sheet link shared as "Anyone with the link can view".
 Columns recognised: Name, Phone, Email, Domain, Address, Date, Deadline - any other column is kept as a note. Rows whose phone already exists are skipped.
 """),
-    _e({"technical_manager"} | ADMIN, "How do I import old work (old clients / old projects)?",
+    _e({"technical_manager", "marketing_manager", "journal_manager"} | ADMIN,
+       "How do I import old work (old clients / old projects)?",
        ["import old", "old work", "old data", "old clients", "old projects", "import", "upload old",
-        "template", "json", "excel", "existing work", "previous work"],
+        "template", "json", "excel", "existing work", "previous work", "split up", "split-up", "installment"],
        """
-Technical Manager: sidebar -> Import Old Work (or the "Import Old Work" button on the dashboard).
+Super Admin, MD / Admin, Technical Manager, Marketing Manager and Journal Manager:
+sidebar -> Import Old Work.
 1. Download the Excel or JSON template and fill ONE row per work.
-2. Required: Client Name, Phone or Email, Service, Status (Not Started / Ongoing / Published / Finished).
+2. Required: Client Name, Phone or Email, Service (SCI / Scopus Paid / EPORS / Synopsis / Survey Synopsis /
+   100 Page Thesis), Status (Not Started / Ongoing / Published / Finished).
    For Ongoing also fill Current Work (Proposal, Implementation, Paper Writing, Client Review, Proofreading,
    Formatting, Submission, Submitted to Journal) and Assigned To (team member's name as in Team).
-3. Don't type a Client ID or Project ID - they are created for you. Same phone or email as an existing
+   Proposal / Implementation are only for SCI and Scopus Paid.
+3. Amount split-up: Total Amount = Registration Amount + Installment 1 + Installment 2 + ...
+   Give each installment a title, amount, Paid / Pending and the paid date. If it doesn't add up to the
+   rupee the row is shown as an error and is not imported. No installments = the balance is saved as one
+   pending "Balance" installment.
+4. Don't type a Client ID or Project ID - they are created for you. Same phone or email as an existing
    client (or an earlier row) = that client's next work (CL-xxxx-S2, -S3...). Every work gets its own PRJ ID.
-4. Upload it - you see a check first (nothing saved), then click Import. Download the result to keep the new IDs.
+5. Upload it - you see a check first (nothing saved) with every amount, then click Import. Download the
+   result to keep the new IDs.
 EPORS and "Scopus paid without implementation" are the same service. Uploading the same file again is safe.
 """,
        ["how do i upload old data", "import old clients", "upload my old work in excel"]),

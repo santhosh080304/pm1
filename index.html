@@ -2733,6 +2733,11 @@ const JOURNAL_NAV_ITEMS = [
 ];
 let jmPage = "dashboard";
 function setJmPage(key){ jmPage = key; refresh(); }
+// "Import Old Work" - Super Admin, MD / Admin, Technical Manager, Marketing Manager and
+// Journal Manager (the server allows exactly these roles: _R_IMPORT_OLD).
+const OW_ROLES = ["super_admin","md_admin","technical_manager","marketing_manager","journal_manager"];
+function canImportOldWork(){ return OW_ROLES.includes(role); }
+const OW_NAV_ITEM = {key:"importOld", icon:"&#11014;&#65039;", label:"Import Old Work"};
 /* ---------- client portal sidebar (Overview / Project Status / Payments / Calendar / My Queries) ---------- */
 const CLIENT_NAV_ITEMS = [
   {key:'overview', icon:'&#9632;', label:'Overview'},
@@ -2792,11 +2797,11 @@ function renderTcSideNav(){
       `<button class="navbtn small2 ${tcView===it.key?'act':''}" onclick="setTcView(${jsq(it.key)})">${it.icon}&nbsp; ${it.label}</button>`
     ).join("");
   } else if(isAdminModern()){
-    nav.innerHTML = ADMIN_NAV_ITEMS.map(it=>
+    nav.innerHTML = ADMIN_NAV_ITEMS.concat([OW_NAV_ITEM]).map(it=>
       `<button class="navbtn ${adminPage===it.key?'act':''}" onclick="setAdminPage(${jsq(it.key)})">${it.icon}&nbsp; ${it.label}</button>`
     ).join("");
   } else if(isMktModern()){
-    nav.innerHTML = MKT_NAV_ITEMS.map(it=>
+    nav.innerHTML = MKT_NAV_ITEMS.concat([OW_NAV_ITEM]).map(it=>
       `<button class="navbtn ${mktPage===it.key?'act':''}" onclick="setMktPage(${jsq(it.key)})">${it.icon}&nbsp; ${it.label}</button>`
     ).join("");
   } else if(isTechManagerModern()){
@@ -2805,13 +2810,14 @@ function renderTcSideNav(){
     // page - only the Technical Manager manages the programmer/paper-writer roster.
     const navItems = (role==="technical_tl" ? ADMIN_NAV_ITEMS.filter(it=>it.key!=="team") : ADMIN_NAV_ITEMS)
       .concat([{key:"validation", icon:"&#128737;&#65039;", label:"Validation"}])
-      // Import Old Work: Technical Manager only (server allows technical_manager + admin).
-      .concat(role==="technical_manager" ? [{key:"importOld", icon:"&#11014;&#65039;", label:"Import Old Work"}] : []);
+      // Import Old Work: Technical Manager (not the Technical TL).
+      .concat(canImportOldWork() ? [OW_NAV_ITEM] : []);
     nav.innerHTML = navItems.map(it=>
       `<button class="navbtn ${tmPage===it.key?'act':''}" onclick="setTmPage(${jsq(it.key)})">${it.icon}&nbsp; ${it.label}</button>`
     ).join("");
   } else if(isJournalModern()){
-    nav.innerHTML = JOURNAL_NAV_ITEMS.map(it=>
+    // Import Old Work: Journal Manager only (not the Journal TL).
+    nav.innerHTML = JOURNAL_NAV_ITEMS.concat(canImportOldWork() ? [OW_NAV_ITEM] : []).map(it=>
       `<button class="navbtn ${jmPage===it.key?'act':''}" onclick="setJmPage(${jsq(it.key)})">${it.icon}&nbsp; ${it.label}</button>`
     ).join("");
   } else if(role==="client"){
@@ -3406,6 +3412,7 @@ function renderMarketingManagerModern(){
   if(mktPage==="tasks"){ setHead("Tasks","Everything assigned to the marketing team",""); renderMktTasks(); return; }
   if(mktPage==="taskDetail"){ setHead("Task","",""); renderMktTaskDetail(); return; }
   if(mktPage==="team"){ setHead("Team","Add and manage BDC staff",""); renderMktTeamPage(); return; }
+  if(mktPage==="importOld"){ owRenderPage(); return; }
   setHead("Dashboard","Marketing performance at a glance",""); renderMktDashboard();
 }
 function renderMktDashboard(){
@@ -3763,16 +3770,33 @@ function renderTechnicalTL(){
   $("content").innerHTML = html;
 }
 
-/* ================= TECHNICAL MANAGER — IMPORT OLD WORK =================
-   Old works kept outside the tool (not started / ongoing / published / finished) are
-   uploaded from the Excel or JSON template. The server creates every Client ID and
-   Project ID: a phone/email that already exists = the same client's next work
-   (CL-1003-S2, -S3 ...). "Check file" is a dry run (nothing saved) so the manager
+/* ================= IMPORT OLD WORK =================
+   Super Admin, MD / Admin, Technical Manager, Marketing Manager and Journal Manager
+   (canImportOldWork). Old works kept outside the tool (not started / ongoing /
+   published / finished) are uploaded from the Excel or JSON template. The server
+   creates every Client ID and Project ID: a phone/email that already exists = the
+   same client's next work (CL-1003-S2, -S3 ...). The amount split-up
+   (Registration + installments = Total) is checked to the rupee and saved exactly
+   like Add Client saves it. "Check file" is a dry run (nothing saved) so the user
    sees exactly what will happen before clicking Import.
    State lives here, not in the <input type=file>, because the dashboard re-renders
    itself every 12 seconds. */
 let owState = {fileName:"", payload:null, preview:null, result:null, busy:false, error:"", filter:"all"};
 function owReset(){ owState = {fileName:"", payload:null, preview:null, result:null, busy:false, error:"", filter:"all"}; rerenderCurrent(); }
+function owRs(n){ return "Rs. " + (Number(n)||0).toLocaleString("en-IN", {maximumFractionDigits:2}); }
+// Each dashboard keeps its own "current page" variable - go to that dashboard's Clients page.
+function owOpenClients(){
+  if(isAdminModern()) adminPage = "clients";
+  else if(isMktModern()) mktPage = "clients";
+  else if(isJournalModern()) jmPage = "clients";
+  else tmPage = "clients";
+  refresh();
+}
+function owRenderPage(){
+  setHead("Import Old Work",
+    "Upload old not-started, ongoing, published and finished works with their amount split-up. Client ID and Project ID are created for you", "");
+  renderTMImportOld();
+}
 async function owDownloadTemplate(fmt){
   try{
     const out = await api("tm_import_template", {format: fmt});
@@ -3809,7 +3833,8 @@ async function owRun(commit){
   if(commit){
     const s = owState.preview && owState.preview.summary;
     if(!s || !s.added){ toast("Nothing to import — fix the rows marked in red first"); return; }
-    if(!confirm(`Import ${s.added} work(s) now?${s.error ? `\n\n${s.error} row(s) with errors will be left out.` : ""}`)) return;
+    if(!confirm(`Import ${s.added} work(s) now?\n\nTotal ${owRs(s.totalAmount)} • Paid ${owRs(s.paidAmount)} • Pending ${owRs(s.pendingAmount)}`
+               + (s.error ? `\n\n${s.error} row(s) with errors will be left out.` : ""))) return;
   }
   owState.busy = true; owState.error = ""; rerenderCurrent();
   try{
@@ -3823,6 +3848,18 @@ async function owRun(commit){
 }
 function owSetFilter(f){ owState.filter = f; rerenderCurrent(); }
 const OW_TEAM_LABEL = {technical:"Technical", journal:"Journal", completed:"Completed", accounts:"Accounts", marketing:"Marketing"};
+// Amount column: Total / Paid / Pending + every line of the split-up.
+function owAmountCell(r){
+  if(!r.total && !(r.split||[]).length) return '<small style="color:var(--muted)">—</small>';
+  const lines = (r.split||[]).map(sp=>`<div style="display:flex;justify-content:space-between;gap:8px;font-size:11.5px;margin:1px 0">
+      <span>${esc(sp.title)}</span>
+      <span style="white-space:nowrap">${owRs(sp.amount)} ${sp.paid
+        ? `<span class="badge b-paid" style="font-size:10px">Paid${sp.date?" "+esc(fmtDate(sp.date)):""}</span>`
+        : `<span class="badge b-gold" style="font-size:10px">Pending</span>`}</span></div>`).join("");
+  return `<div style="font-size:12.5px"><b>${owRs(r.total)}</b>
+      <span style="color:var(--muted)">&bull; paid ${owRs(r.paidAmt)}${r.due>=0.5?` &bull; <b style="color:var(--bad)">pending ${owRs(r.due)}</b>`:""}</span></div>
+    ${lines?`<div style="margin-top:4px;padding-top:4px;border-top:1px dashed var(--line,#e5e7eb)">${lines}</div>`:""}`;
+}
 function owTableHtml(out){
   const rows = out.rows.filter(r=> owState.filter==="all" || r.result===owState.filter || (owState.filter==="warn" && r.result==="added" && r.messages.length));
   const s = out.summary;
@@ -3836,7 +3873,8 @@ function owTableHtml(out){
       <td><b>${esc(r.name||"—")}</b><br><small style="color:var(--muted)">${esc(r.phone||r.email||"")}</small></td>
       <td>${esc(r.service||"—")}</td>
       <td>${esc(r.status||"—")}${r.stageLabel?`<br><small style="color:var(--muted)">&#8594; ${esc(r.stageLabel)}</small>`:""}</td>
-      <td>${r.clientId?`<span class="badge b-purp">${esc(r.clientId)}</span>${r.result==="added"?(r.clientIsNew?' <span class="badge b-gold">New client</span>':(r.sameAsRow?` <span class="badge b-gold">Same client as row ${r.sameAsRow}</span>`:' <span class="badge b-dim">Existing client</span>')):""}`:"—"}</td>
+      <td style="min-width:250px">${owAmountCell(r)}</td>
+      <td style="min-width:150px;white-space:normal;line-height:1.9">${r.clientId?`<span class="badge b-purp">${esc(r.clientId)}</span>${r.result==="added"?(r.clientIsNew?' <span class="badge b-gold">New client</span>':(r.sameAsRow?` <span class="badge b-gold">Same client as row ${r.sameAsRow}</span>`:' <span class="badge b-dim">Existing client</span>')):""}`:"—"}</td>
       <td>${r.projectId?`<span class="badge b-purp">${esc(r.projectId)}</span>`:"—"}</td>
       <td>${r.workNo?`Work ${r.workNo}${r.workCount>1?` of ${r.workCount}`:""}`:"—"}</td>
       <td style="min-width:240px">${r.messages.length?r.messages.map(m=>`<div style="font-size:12px;color:${r.result==="error"?"var(--bad)":"var(--muted)"};margin:2px 0">&bull; ${esc(m)}</div>`).join(""):'<small style="color:var(--muted)">—</small>'}</td>
@@ -3849,21 +3887,29 @@ function owTableHtml(out){
       ${chip("skipped","Skipped",s.skipped,"b-dim")}
       ${chip("error","Errors",s.error,"b-bad")}
     </div>
-    <div style="font-size:13px;color:var(--muted);margin-bottom:10px">
+    <div style="font-size:13px;color:var(--muted);margin-bottom:6px">
       ${s.newClients} new client(s)${s.nextWorkInFile?` &bull; ${s.nextWorkInFile} more work for those new clients`:""} &bull; ${s.moreWorkForExisting} more work for clients already in the tool${teams?` &bull; Goes to: ${teams}`:""}
     </div>
-    <div class="adm-table-wrap"><table class="adm-table" style="min-width:1100px">
-      <thead><tr><th>Row</th><th>Result</th><th>Client</th><th>Service</th><th>Status &#8594; Stage</th><th>Client ID</th><th>Project ID</th><th>Work</th><th>Notes</th></tr></thead>
-      <tbody>${body || `<tr><td colspan="9" style="text-align:center;color:var(--muted)">No rows in this filter.</td></tr>`}</tbody>
+    ${s.added?`<div class="pay-summary" style="margin:0 0 12px;grid-template-columns:repeat(3,minmax(0,1fr))">
+      <div class="stat"><div class="lbl">Total Amount</div><div class="val">${owRs(s.totalAmount)}</div></div>
+      <div class="stat ok"><div class="lbl">Paid</div><div class="val">${owRs(s.paidAmount)}</div></div>
+      <div class="stat ${s.pendingAmount>=0.5?'bad':''}"><div class="lbl">Pending</div><div class="val">${owRs(s.pendingAmount)}</div></div>
+    </div>`:""}
+    <div class="adm-table-wrap"><table class="adm-table" style="min-width:1350px">
+      <thead><tr><th>Row</th><th>Result</th><th>Client</th><th>Service</th><th>Status &#8594; Stage</th><th>Amount split-up</th><th>Client ID</th><th>Project ID</th><th>Work</th><th>Notes</th></tr></thead>
+      <tbody>${body || `<tr><td colspan="10" style="text-align:center;color:var(--muted)">No rows in this filter.</td></tr>`}</tbody>
     </table></div>`;
 }
 function owDownloadResult(){
   const out = owState.result; if(!out) return;
   const q = v=>`"${String(v==null?"":v).replace(/"/g,'""')}"`;
-  const lines = [["Row","Result","Client Name","Phone","Email","Service","Status","Stage","Client ID","Project ID","Work No","Notes"].map(q).join(",")];
+  const lines = [["Row","Result","Client Name","Phone","Email","Service","Status","Stage","Total Amount","Paid","Pending",
+                  "Split-up","Client ID","Project ID","Work No","Notes"].map(q).join(",")];
   out.rows.forEach(r=> lines.push([r.row, r.result, r.name, r.phone, r.email, r.service, r.status, r.stageLabel,
+    r.total||0, r.paidAmt||0, r.due||0,
+    (r.split||[]).map(sp=>`${sp.title} ${sp.amount} (${sp.paid?"Paid"+(sp.date?" "+sp.date:""):"Pending"})`).join("; "),
     r.clientId, r.projectId, r.workNo ? (r.workCount>1 ? `${r.workNo} of ${r.workCount}` : r.workNo) : "", r.messages.join(" | ")].map(q).join(",")));
-  const blob = new Blob(["\ufeff"+lines.join("\r\n")], {type:"text/csv"});
+  const blob = new Blob(["﻿"+lines.join("\r\n")], {type:"text/csv"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
   a.download = "imatiz-old-work-import-result.csv"; document.body.appendChild(a); a.click(); a.remove();
 }
@@ -3874,9 +3920,13 @@ function renderTMImportOld(){
       <h4>1. Download a template</h4>
       <p style="color:var(--muted);font-size:13px;margin-bottom:6px">Fill <b>one row per work</b>. A client with a 2nd or 3rd work gets another row with the <b>same phone or email</b>.
         Don't type a Client ID or Project ID — they are created for you. Same phone/email as a client already in the tool = that client's next work.</p>
-      <p style="color:var(--muted);font-size:13px">Required: Client Name, Phone or Email, Service, Status
-        (<b>Not Started</b> / <b>Ongoing</b> / <b>Published</b> / <b>Finished</b>). For Ongoing, also fill Current Work and Assigned To.
-        <b>EPORS</b> and <b>Scopus paid without implementation</b> are the same service.</p>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:6px">Required: Client Name, Phone or Email, Service
+        (<b>SCI</b> / <b>Scopus Paid</b> / <b>EPORS</b> / <b>Synopsis</b> / <b>Survey Synopsis</b> / <b>100 Page Thesis</b>) and Status
+        (<b>Not Started</b> / <b>Ongoing</b> / <b>Published</b> / <b>Finished</b>). For Ongoing, also fill Current Work and Assigned To —
+        Proposal / Implementation are only for SCI and Scopus Paid. <b>EPORS</b> = Scopus paid without implementation.</p>
+      <p style="color:var(--muted);font-size:13px"><b>Amount split-up:</b> Total Amount = Registration Amount + Installment 1 + Installment 2 + …
+        Give each installment a title, amount, Paid / Pending and the paid date. If it doesn't add up to the rupee, the row is not imported.
+        The Excel file has an Instructions sheet and a Services sheet.</p>
       <div class="import-row">
         <button class="btn gold small" onclick="owDownloadTemplate('xlsx')">&#11015; Excel template (.xlsx)</button>
         <button class="btn ghost small" onclick="owDownloadTemplate('json')">&#11015; JSON template (.json)</button>
@@ -3901,7 +3951,7 @@ function renderTMImportOld(){
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn gold" ${st.busy||!s.added?"disabled":""} onclick="owRun(true)">Import ${s.added} work(s) &#8594;</button></div></div>
       <div style="padding:14px 18px">
-        <p style="font-size:13px;color:var(--muted);margin-bottom:10px">Preview only — nothing is saved yet. The IDs shown are the ones that will be given.
+        <p style="font-size:13px;color:var(--muted);margin-bottom:10px">Preview only — nothing is saved yet. The IDs and amounts shown are the ones that will be saved.
           ${s.error?`<b style="color:var(--bad)">${s.error} row(s) have errors and will be left out</b> — fix them in the file and choose it again, or import the rest now.`:""}</p>
         ${owTableHtml(st.preview)}
       </div></div>`;
@@ -3911,7 +3961,7 @@ function renderTMImportOld(){
     html += `<div class="adm-panel"><div class="adm-panel-head"><h3>&#9989; Imported ${s.added} work(s)</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn ghost small" onclick="owDownloadResult()">&#11015; Download result (.csv)</button>
-          <button class="btn ghost small" onclick="tmPage='clients';refresh()">Open Clients &#8594;</button>
+          <button class="btn ghost small" onclick="owOpenClients()">Open Clients &#8594;</button>
           <button class="btn small" onclick="owReset()">Import another file</button></div></div>
       <div style="padding:14px 18px">${owTableHtml(st.result)}</div></div>`;
   }
@@ -3931,8 +3981,8 @@ function renderTechnicalManagerModern(){
   if(tmPage==="tasks"){ setHead("Tasks","Assign work, add a task, and validate submitted work",""); renderTMTasks(); return; }
   if(tmPage==="validation"){ renderTMValidation(); return; }
   if(tmPage==="importOld"){
-    if(isTL){ tmPage = "dashboard"; }
-    else{ setHead("Import Old Work","Upload old not-started, ongoing, published and finished works. Client ID and Project ID are created for you",""); renderTMImportOld(); return; }
+    if(!canImportOldWork()){ tmPage = "dashboard"; }
+    else{ owRenderPage(); return; }
   }
   if(tmPage==="taskDetail"){ setHead("Task","",""); renderMktTaskDetail(); return; }
   if(tmPage==="team"){
@@ -3945,7 +3995,7 @@ function renderTechnicalManagerModern(){
     "Assign proposal writers, paper writers, give final sign-off, and hand off to clients and the Journal Team",
     `<button class="btn ghost" onclick="openAssignedWorkOverview()" title="See every client with active work, who it's assigned to, and the deadline">&#128203; Assigned Work</button>
      <button class="btn ghost" onclick="openCompletedWorkOverview()" title="See every finished proposal, implementation, and paper-writing task, and who did it">&#9989; Completed Work</button>
-     ${isTL ? "" : `<button class="btn ghost" onclick="setTmPage('importOld')" title="Upload old works from the Excel / JSON template">&#11014;&#65039; Import Old Work</button>`}
+     ${canImportOldWork() ? `<button class="btn ghost" onclick="setTmPage('importOld')" title="Upload old works from the Excel / JSON template">&#11014;&#65039; Import Old Work</button>` : ""}
      <button class="btn gold" onclick="openPingTeam()" title="Call a team member to your cabin or the conference room">&#128222; Call</button>`);
   renderTMDashboard();
 }
@@ -5351,6 +5401,10 @@ function renderJournalManagerModern(){
   if(jmPage==="tasks"){ setHead("Tasks","Assign proofreading, formatting &amp; submission work",""); renderJMTasks(); return; }
   if(jmPage==="taskDetail"){ setHead("Task","",""); renderMktTaskDetail(); return; }
   if(jmPage==="team"){ setHead("Team","Proofreaders, formatters &amp; submission staff",""); renderJMTeam(); return; }
+  if(jmPage==="importOld"){
+    if(canImportOldWork()){ owRenderPage(); return; }
+    jmPage = "dashboard";
+  }
   setHead("Journal Manager Dashboard","Assign proofreading and formatting work, and track journal submissions","");
   $("content").innerHTML = journalDashboardPanel();
 }
@@ -7060,6 +7114,7 @@ function renderAdmin(){
   if(adminPage==="journals"){ setHead("Journals","Journal submissions and publication status",""); renderAdminJournals(); return; }
   if(adminPage==="tasks"){ setHead("Work Log","Work logged by every team, most recent first — not the project task list (see Projects > Tasks / Task Board for that)",""); renderAdminTasks(); return; }
   if(adminPage==="team"){ setHead("Team","Logins, employees, and access control",""); renderAdminTeam(); if(!adminDirectory){ loadAdminDirectory().then(rerenderCurrent); } return; }
+  if(adminPage==="importOld"){ owRenderPage(); return; }
   setHead("Dashboard","Organisation-wide view of the full pipeline",""); renderAdminDashboard();
 }
 

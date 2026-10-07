@@ -1,0 +1,44 @@
+IMPORT OLD WORK - ROLES, SERVICES AND AMOUNT SPLIT-UP FIX
+==========================================================
+
+WHO CAN USE IT
+  Super Admin, MD / Admin, Technical Manager, Marketing Manager, Journal Manager.
+  Sidebar -> "Import Old Work" on each of their dashboards.
+  Technical TL, Journal TL, Marketing TL, telecallers and employees cannot (menu hidden
+  and blocked on the server - new role group _R_IMPORT_OLD in server.py).
+
+AMOUNT SPLIT-UP (was broken: everything paid went into "Registration", no installments)
+  Template now has:  Total Amount | Registration Amount | Registration Paid Date | Split-up Name
+                     Installment 1..6  Title | Amount | Status (Paid/Pending) | Paid Date
+  (more installments: add "Installment 7 Title / Amount / Status / Paid Date" columns ...)
+  Rule: Registration Amount + all installments = Total Amount, to the rupee.
+        If not, the row is an ERROR and is not imported (the message shows the exact difference).
+  Saved exactly like Add Client: Registration -> payments (paid), installments ->
+  client_installments (paid with date / pending). So Payments, Pending Amount, Collection
+  and the client portal all show the right figures.
+  No installments given -> the balance is saved as one pending "Balance" installment.
+  Old files with only "Total Amount" + "Amount Paid" still work (Amount Paid = Registration).
+  If both the split-up and "Amount Paid" are given they must match.
+
+SERVICES (were sometimes guessed)
+  SCI / Scopus Paid / EPORS / Synopsis / Survey Synopsis / 100 Page Thesis.
+  A vague value like just "Scopus" is now an error, not a guess.
+  Ongoing + Proposal / Implementation for a service without implementation (EPORS, Synopsis,
+  Survey Synopsis, 100 Page Thesis) is now an error instead of being silently moved.
+  Ongoing without Current Work is now an error.
+
+TEMPLATE (downloadable from the page)
+  Excel: "Old Work" sheet (client/work columns + green AMOUNT SPLIT-UP section, dropdowns
+  for Service, Status, Current Work and every installment Status), "Instructions" sheet,
+  "Services" sheet (what to type, allowed Current Work, usual split-up).
+  JSON: "installments": [ {title, amount, status, paidDate}, ... ] per record.
+
+PREVIEW / RESULT
+  New "Amount split-up" column (total, paid, pending, every line Paid/Pending with date)
+  and Total / Paid / Pending totals. Result CSV includes the amounts and split-up.
+
+ALSO FIXED
+  .tsv uploads were read as comma-separated. Deadline before Registration Date is an error.
+  Invalid Alternate Mobile is flagged. Help assistant text updated.
+
+FILES CHANGED: server.py, index.html, help_assistant.py

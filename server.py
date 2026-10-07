@@ -658,6 +658,9 @@ _R_TECH_MGMT = ("technical_manager", "technical_tl") + _R_ADMIN
 _R_TECH_MGR = ("technical_manager",) + _R_ADMIN
 _R_JOURNAL = ("journal_manager", "journal_tl") + _R_ADMIN
 _R_MANAGERS = ("marketing_manager", "technical_manager", "journal_manager") + _R_ADMIN
+# Import Old Work: Super Admin, MD / Admin, Technical Manager, Marketing Manager and
+# Journal Manager (NOT the TLs, telecallers or employees).
+_R_IMPORT_OLD = ("technical_manager", "marketing_manager", "journal_manager") + _R_ADMIN
 _R_STAFF_MGMT = ("technical_manager", "technical_tl", "marketing_tl", "marketing_manager",
                  "journal_manager", "journal_tl") + _R_ADMIN
 
@@ -869,10 +872,11 @@ ACTION_ROLES = {
     "admin_clear_data": _R_ADMIN,
     "admin_import_data": _R_ADMIN,
     "admin_import_summary": _R_ADMIN,
-    # Technical Manager > Import Old Work (old spreadsheets -> pipeline, with
-    # Client ID / Project ID generated and phone/email matching for 2nd/3rd works).
-    "tm_import_template": _R_TECH_MGR,
-    "tm_import_old_work": _R_TECH_MGR,
+    # Import Old Work (old spreadsheets -> pipeline, with Client ID / Project ID generated,
+    # phone/email matching for 2nd/3rd works and the full amount split-up).
+    # Super Admin, MD / Admin, Technical Manager, Marketing Manager, Journal Manager.
+    "tm_import_template": _R_IMPORT_OLD,
+    "tm_import_old_work": _R_IMPORT_OLD,
     "send_email": _R_ADMIN + ("marketing_manager", "marketing_tl"),
     "save_my_email": _R_ALL_STAFF,
     # My profile: every login, including the Validation login (clients: CLIENT_ALLOWED_ACTIONS).
@@ -4189,13 +4193,14 @@ def _import_rows(con, rows):
 
 
 # =====================================================================
-# IMPORT OLD WORK  (Technical Manager > "Import Old Work")
+# IMPORT OLD WORK  (Super Admin, MD / Admin, Technical Manager, Marketing Manager,
+#                   Journal Manager > "Import Old Work")
 # ---------------------------------------------------------------------
 # Brings work that was tracked outside this tool (old spreadsheets) into the
 # pipeline in one go: not-started, ongoing, published and finished works.
 #
-# * The Technical Manager downloads a template (Excel or JSON), fills one row
-#   per WORK, and uploads it (.xlsx / .csv / .json).
+# * The user downloads a template (Excel or JSON), fills one row per WORK, and
+#   uploads it (.xlsx / .csv / .json).
 # * Client ID and Project ID are NEVER typed in the file - they are generated
 #   here, exactly like add_client does:
 #     - phone OR email matches an existing client (or an earlier row in the same
@@ -4203,15 +4208,28 @@ def _import_rows(con, rows):
 #       (CL-1003-S2, CL-1003-S3 ...);
 #     - otherwise a brand-new CL-ID.
 #     - every row (work) gets its own new PRJ-ID.
+# * Service must be one of the tool's services, written clearly (SCI, Scopus Paid,
+#   EPORS, Synopsis, Survey Synopsis, 100 Page Thesis). A vague value such as just
+#   "Scopus" is an ERROR, never a guess. A service without implementation (EPORS,
+#   Synopsis, Survey Synopsis, 100 Page Thesis) can't be "Ongoing - Proposal /
+#   Implementation" - that is an error too, nothing is moved silently.
+# * AMOUNT SPLIT-UP - saved exactly the way "Add Client" saves it, so every
+#   dashboard (Payments, Pending Amount, Collection, client portal) shows it right:
+#     Total Amount
+#     = Registration Amount (paid at registration -> payments.reg)
+#     + Installment 1..N (title, amount, Paid/Pending, paid date -> client_installments)
+#   The split MUST add up to the Total (to the rupee) or the row is rejected.
+#   If no installments are given, the balance (Total - Registration) is saved as
+#   one pending "Balance" installment so nothing goes missing.
+#   Old templates (only "Total Amount" + "Amount Paid") still work: Amount Paid is
+#   taken as the Registration payment.
 # * Status decides where the work lands:
 #     Not Started -> Technical queue, waiting to be assigned (TECH_ASSIGNED)
-#     Ongoing     -> the stage named in "Current Work" (Proposal, Implementation,
-#                    Paper Writing, Client Review, Proofreading, Formatting,
-#                    Submission, Submitted to Journal)
+#     Ongoing     -> the stage named in "Current Work"
 #     Published   -> Completed, journal status PUBLISHED
 #     Finished    -> Completed
 # * "Check file" runs the whole import inside a transaction and rolls it back,
-#   so the preview shows the real IDs / stages / warnings without saving.
+#   so the preview shows the real IDs / stages / amounts / warnings without saving.
 # * Imported works don't start the stage-reminder clock (stage_entered_at stays
 #   empty), so old data never floods anyone with "you're late" pop-ups, and no
 #   hand-off emails are sent.
@@ -4219,6 +4237,7 @@ def _import_rows(con, rows):
 #   registration date already exists is skipped as "already imported".
 # =====================================================================
 OLD_WORK_MAX_ROWS = 2000
+OLD_WORK_TEMPLATE_INSTALLMENTS = 6       # columns in the Excel template (more can be added)
 
 # (field, column header in the template, extra accepted header/key spellings)
 # Header / JSON key matching ignores case, spaces and punctuation, so
@@ -4244,12 +4263,25 @@ OLD_WORK_FIELDS = [
                                       "dateofregistration"]),
     ("deadlineDate", "Deadline", ["deadlinedate", "enddate", "duedate", "projectdeadline"]),
     ("journalName", "Journal Name", ["journal", "journals", "targetjournal"]),
-    ("totalAmount", "Total Amount", ["total", "totalfee", "totalfees", "packageamount", "projectamount"]),
-    ("amountPaid", "Amount Paid", ["paid", "paidamount", "received", "amountreceived", "advance"]),
     ("bdc", "BDC", ["bdcname", "telecaller", "salesperson"]),
     ("referredBy", "Referred By", ["referral", "reference", "referredby"]),
     ("notes", "Notes", ["remarks", "remark", "comment", "comments", "note"]),
+    # ----- amount split-up -----
+    ("totalAmount", "Total Amount", ["total", "totalfee", "totalfees", "packageamount", "projectamount",
+                                     "totalamountrs", "totalrs"]),
+    ("regAmount", "Registration Amount", ["regamount", "registrationfee", "registrationfees", "regfee",
+                                          "registrationpaid", "regpaid", "registrationamountpaid"]),
+    ("regPaidDate", "Registration Paid Date", ["regpaiddate", "registrationpaymentdate", "regpaymentdate",
+                                               "registrationpaidon"]),
+    ("splitName", "Split-up Name", ["installmentplanname", "planname", "splitupname", "splitname",
+                                    "paymentplan", "installmentplan"]),
+    # Old template column - still read. When the split-up is filled it is only used to
+    # cross-check (it must equal Registration + paid installments).
+    ("amountPaid", "Amount Paid", ["paid", "paidamount", "received", "amountreceived", "advance",
+                                   "totalpaid"]),
 ]
+_OW_NOT_IN_TEMPLATE = {"amountPaid"}
+_OW_MONEY_FIELDS = ("totalAmount", "regAmount", "regPaidDate", "splitName")
 
 
 def _ow_key(s):
@@ -4261,41 +4293,77 @@ for _f, _label, _alts in OLD_WORK_FIELDS:
     for _a in [_f, _label] + _alts:
         _OW_ALIAS.setdefault(_ow_key(_a), _f)
 
+# "Installment 3 Amount", "inst3_paid_date", "installment3" ... -> (3, "amount" | "title" | "status" | "paidDate")
+_OW_INST_RE = re.compile(r"^(?:installment|inst|instalment)(\d{1,2})"
+                         r"(title|name|label|amount|amt|rs|status|paidstatus|paiddate|paidon|date)?$")
+
+
+def _ow_inst_key(raw):
+    m = _OW_INST_RE.match(_ow_key(raw))
+    if not m:
+        return None
+    n = int(m.group(1))
+    if n < 1:
+        return None
+    part = m.group(2) or "amount"
+    part = {"name": "title", "label": "title", "amt": "amount", "rs": "amount", "paidstatus": "status",
+            "paidon": "paidDate", "paiddate": "paidDate", "date": "paidDate"}.get(part, part)
+    return n, part
+
+
 # Choices shown in the template dropdowns / instructions.
-OLD_WORK_SERVICE_CHOICES = ["SCI", "Scopus Paid", "EPORS", "Synopsis", "Survey Synopsis", "100 Page Thesis"]
+# (what to type in the sheet, SERVICES key)
+OLD_WORK_SERVICES = [
+    ("SCI", "SCI"),
+    ("Scopus Paid", "SCOPUS_PAID"),
+    ("EPORS", "SCOPUS_NO_IMPL"),
+    ("Synopsis", "SYNOPSIS"),
+    ("Survey Synopsis", "SURVEY_SYNOPSIS"),
+    ("100 Page Thesis", "THESIS_100"),
+]
+OLD_WORK_SERVICE_CHOICES = [t for t, _ in OLD_WORK_SERVICES]
 OLD_WORK_STATUS_CHOICES = ["Not Started", "Ongoing", "Published", "Finished"]
 OLD_WORK_CURRENT_CHOICES = ["Proposal", "Implementation", "Paper Writing", "Client Review",
                             "Proofreading", "Formatting", "Submission", "Submitted to Journal"]
+OLD_WORK_CURRENT_NO_IMPL = [c for c in OLD_WORK_CURRENT_CHOICES if c not in ("Proposal", "Implementation")]
+OLD_WORK_INST_STATUS_CHOICES = ["Paid", "Pending"]
 
 
 def _ow_service_key(raw):
-    """Map whatever the sheet says ("EPORS", "scopus paid without impl", "SCI", ...)
-    onto a SERVICES key. EPORS and "Scopus paid without implementation" are the
-    same service (SCOPUS_NO_IMPL)."""
-    k = _ow_key(raw)
+    """Map what the sheet says onto a SERVICES key -> (key, None) or (None, error).
+    Never guesses: anything vague is an error the user must fix."""
+    s = str(raw or "").strip()
+    k = _ow_key(s)
     if not k:
-        return None
-    up = str(raw).strip().upper()
+        return None, "Service is missing."
+    choices = ", ".join(OLD_WORK_SERVICE_CHOICES)
+    up = s.upper().replace(" ", "_")
     if up in SERVICES:
-        return up
+        return up, None
+    for typed, key in OLD_WORK_SERVICES:
+        if k == _ow_key(typed):
+            return key, None
     for key, conf in SERVICES.items():
-        if k == _ow_key(conf["label"]):
-            return key
+        if k in (_ow_key(conf["label"]), _ow_key(key)):
+            return key, None
     if "epors" in k or "epor" in k:
-        return "SCOPUS_NO_IMPL"
+        return "SCOPUS_NO_IMPL", None
     if "scopus" in k:
-        if "without" in k or "noimpl" in k or "nonimpl" in k or "withoutimpl" in k:
-            return "SCOPUS_NO_IMPL"
-        return "SCOPUS_PAID"
-    if "survey" in k:
-        return "SURVEY_SYNOPSIS"
-    if "synopsis" in k:
-        return "SYNOPSIS"
-    if "thesis" in k:
-        return "THESIS_100"
-    if k.startswith("sci"):
-        return "SCI"
-    return None
+        if any(x in k for x in ("without", "noimpl", "nonimpl", "withoutimpl", "noimplementation")):
+            return "SCOPUS_NO_IMPL", None
+        if "paid" in k or "withimpl" in k or "implementation" in k:
+            return "SCOPUS_PAID", None
+        return None, (f"Service \"{s}\" is not clear - write \"Scopus Paid\" (with implementation) "
+                      f"or \"EPORS\" (Scopus paid without implementation).")
+    if "survey" in k and "synopsis" in k:
+        return "SURVEY_SYNOPSIS", None
+    if k in ("synopsis", "synopsiswriting", "researchsynopsis"):
+        return "SYNOPSIS", None
+    if "thesis" in k and ("100" in k or "hundred" in k):
+        return "THESIS_100", None
+    if k in ("sci", "scipaid", "sciwithimplementation", "sciimplementation", "scijournal", "sciwithimpl"):
+        return "SCI", None
+    return None, f"Service \"{s}\" isn't one of the tool's services - use one of: {choices}."
 
 
 def _ow_status(raw):
@@ -4363,6 +4431,11 @@ def _ow_date(raw):
     if isinstance(raw, (int, float)):
         return _excel_serial_to_iso(raw)
     s = str(raw).strip()
+    if re.match(r"^\d+(\.\d+)?$", s):            # a serial number that came through as text (CSV)
+        try:
+            return _excel_serial_to_iso(float(s))
+        except Exception:
+            return None
     m = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", s)
     if m:
         try:
@@ -4385,9 +4458,16 @@ def _ow_date(raw):
     return None
 
 
+def _ow_blank(v):
+    return v is None or str(v).strip() == ""
+
+
 def _ow_amount(raw):
-    if raw is None or str(raw).strip() == "":
+    """'70,000' / 'Rs. 70000/-' / '₹ 70000' / 70000.0 -> 70000.0; blank -> 0.0; junk -> None."""
+    if _ow_blank(raw):
         return 0.0
+    if isinstance(raw, bool):
+        return None
     if isinstance(raw, (int, float)):
         return float(raw)
     s = re.sub(r"(?i)rs\.?|inr|₹|,|\s|/-", "", str(raw))
@@ -4397,12 +4477,44 @@ def _ow_amount(raw):
         return None
 
 
+def _ow_rs(x):
+    """70000 -> 'Rs. 70,000' (Indian grouping, paise only when present)."""
+    x = float(x or 0)
+    neg, x = x < 0, abs(x)
+    whole = int(round(x)) if abs(x - round(x)) < 0.005 else int(x)
+    paise = "" if abs(x - round(x)) < 0.005 else f"{x:.2f}"[-3:]
+    s = str(whole)
+    if len(s) > 3:
+        head, tail = s[:-3], s[-3:]
+        parts = []
+        while len(head) > 2:
+            parts.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            parts.insert(0, head)
+        s = ",".join(parts) + "," + tail
+    return ("-" if neg else "") + "Rs. " + s + paise
+
+
+def _ow_inst_status(raw):
+    """-> ("paid" | "pending" | "", None) or (None, error)."""
+    k = _ow_key(raw)
+    if not k:
+        return "", None
+    if k in ("paid", "received", "yes", "y", "done", "completed", "collected", "cleared", "success", "true"):
+        return "paid", None
+    if k in ("pending", "due", "notpaid", "unpaid", "no", "n", "notreceived", "balance", "false", "yettopay"):
+        return "pending", None
+    return None, f"\"{str(raw).strip()}\" - use Paid or Pending."
+
+
 def _ow_records_from_rows(rows):
-    """Spreadsheet rows (first = header) -> [(rowNumber, {field: value}, [extra notes])]."""
+    """Spreadsheet rows (first = header) -> [(rowNumber, {field: value}, [extra notes])].
+    Installment columns ("Installment 3 Amount" ...) go to rec["__inst"] = {3: {"amount": ..}}."""
     if not rows:
         return []
     header_idx = 0
-    # Skip any title/blank lines above the real header (people paste sheets with a title row).
+    # Skip any title/group/blank lines above the real header (the template has a group row).
     for i, r in enumerate(rows[:10]):
         keys = {_OW_ALIAS.get(_ow_key(h)) for h in r if h is not None}
         if "name" in keys and ("phone" in keys or "email" in keys):
@@ -4412,8 +4524,12 @@ def _ow_records_from_rows(rows):
     mapping, extra = {}, {}
     for i, h in enumerate(header):
         label = str(h).strip() if h is not None else ""
+        inst = _ow_inst_key(label) if label else None
         f = _OW_ALIAS.get(_ow_key(label))
-        if f and f not in mapping.values():
+        if inst:
+            if inst not in mapping.values():
+                mapping[i] = inst
+        elif f and f not in mapping.values():
             mapping[i] = f
         elif label:
             extra[i] = label
@@ -4426,7 +4542,11 @@ def _ow_records_from_rows(rows):
             if v is None or str(v).strip() == "":
                 continue
             if i in mapping:
-                rec[mapping[i]] = v
+                m = mapping[i]
+                if isinstance(m, tuple):
+                    rec.setdefault("__inst", {}).setdefault(m[0], {})[m[1]] = v
+                else:
+                    rec[m] = v
             elif i in extra:
                 notes.append(f"{extra[i]}: {str(v).strip()}")
         out.append((n, rec, notes))
@@ -4458,13 +4578,35 @@ def _ow_records_from_json(text):
             continue
         rec, notes = {}, []
         for k, v in item.items():
-            if str(k).startswith("_") or v is None or (isinstance(v, str) and not v.strip()):
+            if str(k).startswith("_"):
+                continue
+            kk = _ow_key(k)
+            # "installments": [ {"title": .., "amount": .., "status": .., "paidDate": ..}, ... ]
+            if kk in ("installments", "installment", "splitup", "split", "paymentsplit", "amountsplit",
+                      "instalments") and isinstance(v, list):
+                for idx, it in enumerate(v, start=1):
+                    if isinstance(it, dict):
+                        slot = rec.setdefault("__inst", {}).setdefault(idx, {})
+                        for ik, iv in it.items():
+                            part = {"title": "title", "name": "title", "label": "title", "amount": "amount",
+                                    "amt": "amount", "status": "status", "paiddate": "paidDate",
+                                    "paidon": "paidDate", "date": "paidDate"}.get(_ow_key(ik))
+                            if part and not _ow_blank(iv):
+                                slot[part] = iv
+                    elif not _ow_blank(it):
+                        rec.setdefault("__inst", {}).setdefault(idx, {})["amount"] = it
+                continue
+            if v is None or (isinstance(v, str) and not v.strip()):
                 continue
             if isinstance(v, (list, tuple)):
                 v = ", ".join(str(x) for x in v)
             elif isinstance(v, dict):
                 continue
-            f = _OW_ALIAS.get(_ow_key(k))
+            inst = _ow_inst_key(k)
+            if inst:
+                rec.setdefault("__inst", {}).setdefault(inst[0], {})[inst[1]] = v
+                continue
+            f = _OW_ALIAS.get(kk)
             if f and f not in rec:
                 rec[f] = v
             else:
@@ -4531,6 +4673,114 @@ def _ow_next_ids(con):
     return n, pn
 
 
+def _ow_money_plan(rec, reg_date, status, errs, warns):
+    """Validate the amount split-up of one row.
+    Returns {"total", "reg", "regDate", "inst": [{title, amount, status, paidDate}], "paid", "due",
+             "planName"} or None when there are errors (already appended to errs)."""
+    n_err = len(errs)
+    total_raw, reg_raw, paid_raw = rec.get("totalAmount"), rec.get("regAmount"), rec.get("amountPaid")
+    total = _ow_amount(total_raw)
+    reg = _ow_amount(reg_raw)
+    paid_col = _ow_amount(paid_raw)
+    if total is None:
+        errs.append(f"Total Amount \"{total_raw}\" isn't a number.")
+    elif total < 0:
+        errs.append("Total Amount can't be negative.")
+    if reg is None:
+        errs.append(f"Registration Amount \"{reg_raw}\" isn't a number.")
+    elif reg < 0:
+        errs.append("Registration Amount can't be negative.")
+    if paid_col is None:
+        errs.append(f"Amount Paid \"{paid_raw}\" isn't a number.")
+    reg_paid_date = _ow_date(rec.get("regPaidDate"))
+    if not _ow_blank(rec.get("regPaidDate")) and not reg_paid_date:
+        errs.append(f"Registration Paid Date \"{rec.get('regPaidDate')}\" isn't a date (use YYYY-MM-DD or DD-MM-YYYY).")
+
+    # ----- installments -----
+    inst = []
+    no_date_paid = []
+    for n in sorted((rec.get("__inst") or {}).keys()):
+        cell = rec["__inst"][n]
+        if not any(not _ow_blank(v) for v in cell.values()):
+            continue
+        lbl = f"Installment {n}"
+        title = str(cell.get("title") or "").strip() or lbl
+        amt = _ow_amount(cell.get("amount"))
+        st, st_err = _ow_inst_status(cell.get("status"))
+        pdate = _ow_date(cell.get("paidDate"))
+        if _ow_blank(cell.get("amount")):
+            errs.append(f"{lbl} has a title/status/date but no Amount.")
+            continue
+        if amt is None:
+            errs.append(f"{lbl} Amount \"{cell.get('amount')}\" isn't a number.")
+            continue
+        if amt <= 0:
+            errs.append(f"{lbl} Amount must be more than zero (leave the whole installment empty if there is none).")
+            continue
+        if st_err:
+            errs.append(f"{lbl} Status {st_err}")
+            continue
+        if not _ow_blank(cell.get("paidDate")) and not pdate:
+            errs.append(f"{lbl} Paid Date \"{cell.get('paidDate')}\" isn't a date (use YYYY-MM-DD or DD-MM-YYYY).")
+            continue
+        if st == "pending" and pdate:
+            errs.append(f"{lbl} says Pending but has a Paid Date - set Status to Paid or clear the date.")
+            continue
+        if not st:
+            st = "paid" if pdate else "pending"
+        if st == "paid" and not pdate:
+            pdate = reg_date
+            no_date_paid.append(lbl)
+        inst.append({"title": title[:120], "amount": round(amt, 2), "status": st,
+                     "paidDate": pdate if st == "paid" else None})
+    if len(errs) > n_err:
+        return None
+
+    has_split = not _ow_blank(reg_raw) or bool(inst)
+    legacy = not has_split and not _ow_blank(paid_raw)
+    if legacy:
+        # Old template: only Total + Amount Paid -> Amount Paid is the Registration payment.
+        reg = paid_col
+        if reg:
+            warns.append(f"No split-up columns filled - Amount Paid ({_ow_rs(reg)}) saved as the Registration payment.")
+    inst_sum = sum(i["amount"] for i in inst)
+    if not total:
+        total = (reg or 0) + inst_sum
+        if total:
+            warns.append(f"No Total Amount - taken as Registration + installments = {_ow_rs(total)}.")
+    if (reg or 0) > total + 0.004:
+        errs.append(f"Registration Amount ({_ow_rs(reg)}) is more than the Total Amount ({_ow_rs(total)}).")
+        return None
+    if inst:
+        if abs((reg or 0) + inst_sum - total) >= 0.5:
+            diff = total - (reg or 0) - inst_sum
+            errs.append(f"Split-up doesn't add up: Registration {_ow_rs(reg or 0)} + installments "
+                        f"{_ow_rs(inst_sum)} = {_ow_rs((reg or 0) + inst_sum)}, but Total Amount is "
+                        f"{_ow_rs(total)} ({_ow_rs(abs(diff))} {'short' if diff > 0 else 'too much'}).")
+            return None
+    else:
+        balance = round(total - (reg or 0), 2)
+        if balance >= 0.5:
+            inst.append({"title": "Balance", "amount": balance, "status": "pending", "paidDate": None})
+            warns.append(f"No installments given - the balance {_ow_rs(balance)} was added as one pending "
+                         "\"Balance\" installment.")
+    if no_date_paid:
+        warns.append(f"{', '.join(no_date_paid)} marked Paid with no Paid Date - registration date {reg_date} used.")
+    paid_total = (reg or 0) + sum(i["amount"] for i in inst if i["status"] == "paid")
+    if has_split and not _ow_blank(paid_raw) and abs((paid_col or 0) - paid_total) >= 0.5:
+        errs.append(f"Amount Paid ({_ow_rs(paid_col or 0)}) doesn't match the split-up: Registration + paid "
+                    f"installments = {_ow_rs(paid_total)}. Fix one of them (or clear Amount Paid).")
+        return None
+    due = round(total - paid_total, 2)
+    if not total:
+        warns.append("No amounts given - the work is saved without payment details.")
+    elif status in ("PUBLISHED", "FINISHED") and due >= 0.5:
+        warns.append(f"Work is {status.title()} but {_ow_rs(due)} is still pending - it will show under Pending Amount.")
+    return {"total": round(total, 2), "reg": round(reg or 0, 2), "regDate": reg_paid_date or reg_date,
+            "inst": inst, "paid": round(paid_total, 2), "due": max(0.0, due),
+            "planName": str(rec.get("splitName") or "").strip()[:120]}
+
+
 def import_old_work(con, records, actor, commit):
     """Validate + insert every record. With commit=False everything is rolled back
     afterwards (preview). Returns the per-row report."""
@@ -4570,7 +4820,8 @@ def import_old_work(con, records, actor, commit):
     for n, rec, extra_notes in records:
         row = {"row": n, "name": str(rec.get("name") or "").strip(), "phone": "", "email": "",
                "service": "", "status": "", "stage": "", "stageLabel": "", "clientId": "",
-               "projectId": "", "workNo": 0, "clientIsNew": False, "result": "", "messages": []}
+               "projectId": "", "workNo": 0, "clientIsNew": False, "result": "", "messages": [],
+               "total": 0, "paidAmt": 0, "due": 0, "split": []}
         report.append(row)
         if rec.get("__bad"):
             row.update(result="error", messages=["This entry isn't an object { ... } - skipped."])
@@ -4593,12 +4844,14 @@ def import_old_work(con, records, actor, commit):
             email = ""
         if not phone and not email and not errs:
             errs.append("Give a Phone or an Email - it's how the client is matched and how they sign in.")
+        alt = _ow_phone(rec.get("altMobile"))
+        if rec.get("altMobile") not in (None, "") and not re.match(r"^\d{10}$", alt):
+            warns.append(f"Alternate Mobile \"{rec.get('altMobile')}\" isn't a 10-digit number - left empty.")
+            alt = ""
 
-        svc = _ow_service_key(rec.get("service"))
-        if not svc:
-            errs.append("Service is missing." if not str(rec.get("service") or "").strip() else
-                        f"Service \"{rec.get('service')}\" isn't recognised - use one of: "
-                        + ", ".join(OLD_WORK_SERVICE_CHOICES) + ".")
+        svc, svc_err = _ow_service_key(rec.get("service"))
+        if svc_err:
+            errs.append(svc_err)
         else:
             row["service"] = SERVICES[svc]["label"]
         status, s_err = _ow_status(rec.get("status"))
@@ -4609,23 +4862,20 @@ def import_old_work(con, records, actor, commit):
         reg = _ow_date(rec.get("regDate"))
         if rec.get("regDate") not in (None, "") and not reg:
             errs.append(f"Registration Date \"{rec.get('regDate')}\" isn't a date (use YYYY-MM-DD or DD-MM-YYYY).")
-        if not reg and not errs:
+        if not reg:
             reg = date.today().isoformat()
-            warns.append("No Registration Date - today's date was used.")
+            if _ow_blank(rec.get("regDate")):
+                warns.append("No Registration Date - today's date was used.")
         deadline = _ow_date(rec.get("deadlineDate"))
         if rec.get("deadlineDate") not in (None, "") and not deadline:
             errs.append(f"Deadline \"{rec.get('deadlineDate')}\" isn't a date (use YYYY-MM-DD or DD-MM-YYYY).")
+        if deadline and reg and deadline < reg:
+            errs.append(f"Deadline ({deadline}) is before the Registration Date ({reg}).")
         no_deadline = bool(reg and not deadline)
         if no_deadline:
             deadline = _default_deadline(reg)
-        total = _ow_amount(rec.get("totalAmount"))
-        paid = _ow_amount(rec.get("amountPaid"))
-        if total is None:
-            errs.append(f"Total Amount \"{rec.get('totalAmount')}\" isn't a number.")
-        if paid is None:
-            errs.append(f"Amount Paid \"{rec.get('amountPaid')}\" isn't a number.")
-        if total and paid and paid > total:
-            warns.append("Amount Paid is more than the Total Amount - check the figures.")
+
+        money = _ow_money_plan(rec, reg, status, errs, warns)
 
         # ----- where does this work go? -----
         stage, assign_people, assign_roles, task_type = None, [], (), None
@@ -4640,18 +4890,17 @@ def import_old_work(con, records, actor, commit):
                     kind, stage = None, status
                 else:
                     kind = _ow_current_work(rec.get("currentWork"))
+                    allowed = OLD_WORK_CURRENT_CHOICES if has_impl else OLD_WORK_CURRENT_NO_IMPL
                     if kind == "?":
-                        errs.append(f"Current Work \"{rec.get('currentWork')}\" isn't recognised - use one of: "
-                                    + ", ".join(OLD_WORK_CURRENT_CHOICES) + ".")
-                    if not kind:
-                        kind = "PROPOSAL" if has_impl else "PAPER_WRITING"
-                        warns.append(f"Ongoing with no Current Work - treated as "
-                                     f"{'Proposal' if has_impl else 'Paper Writing'}.")
-                    if kind in ("PROPOSAL", "IMPLEMENTATION") and not has_impl:
-                        warns.append(f"{SERVICES[svc]['label']} has no proposal/implementation step - "
-                                     "placed in Paper Writing instead.")
-                        kind = "PAPER_WRITING"
-                    if kind and kind != "?":
+                        errs.append(f"Current Work \"{rec.get('currentWork')}\" isn't recognised - for "
+                                    f"{SERVICES[svc]['label']} use one of: " + ", ".join(allowed) + ".")
+                    elif not kind:
+                        errs.append(f"Status is Ongoing, so Current Work is required - for "
+                                    f"{SERVICES[svc]['label']} use one of: " + ", ".join(allowed) + ".")
+                    elif kind in ("PROPOSAL", "IMPLEMENTATION") and not has_impl:
+                        errs.append(f"{SERVICES[svc]['label']} has no Proposal / Implementation step - "
+                                    "Current Work must be one of: " + ", ".join(allowed) + ".")
+                    else:
                         stage, assign_roles, fallback = _ow_ongoing_plan(kind, has_impl)
                         task_type = {"PROPOSAL": "PROPOSAL", "IMPLEMENTATION": "IMPLEMENTATION",
                                      "PAPER_WRITING": "PAPER_WRITING"}.get(kind)
@@ -4666,22 +4915,34 @@ def import_old_work(con, records, actor, commit):
                                     assign_people.append(hit[0])
                             else:
                                 unknown.append(p)
-                        if unknown:
+                        if unknown and assign_roles:
                             role_txt = {"PAPER_WRITER": "Paper Writer", "PROGRAMMER": "Programmer",
                                         "JOURNAL_EMPLOYEE": "Journal team member"}
                             who = " / ".join(role_txt.get(x, x) for x in assign_roles) or "team member"
                             warns.append(f"\"{', '.join(unknown)}\" isn't an active {who} on the team - "
                                          "not assigned. Add them in Team first, or assign later.")
+                        elif unknown:
+                            warns.append(f"Assigned To \"{', '.join(unknown)}\" ignored - nobody is assigned "
+                                         "at this step.")
                         if kind == "PROPOSAL" and len(assign_people) > 1:
                             warns.append(f"A proposal has one writer - {assign_people[0]} was used.")
                             assign_people = assign_people[:1]
                         if kind == "SUBMISSION" and len(assign_people) > 1:
+                            warns.append(f"Submission has one person - {assign_people[0]} was used.")
                             assign_people = assign_people[:1]
                         if assign_roles and not assign_people and stage != fallback:
                             stage = fallback
                             warns.append("Nobody assigned - " + _OW_FALLBACK_TEXT.get(fallback, "placed in the queue") + ".")
+            if status != "ONGOING" and not _ow_blank(rec.get("currentWork")) and stage:
+                warns.append(f"Current Work is only used for Ongoing work - ignored for \"{row['status']}\".")
 
-        if errs:
+        if money:
+            row.update(total=money["total"], paidAmt=money["paid"], due=money["due"],
+                       split=([{"title": "Registration", "amount": money["reg"], "paid": True,
+                                "date": money["regDate"]}] if money["reg"] else [])
+                       + [{"title": i["title"], "amount": i["amount"], "paid": i["status"] == "paid",
+                           "date": i["paidDate"] or ""} for i in money["inst"]])
+        if errs or not money:
             row.update(result="error", messages=errs + warns)
             continue
         if no_deadline and stage != "COMPLETED":
@@ -4693,8 +4954,8 @@ def import_old_work(con, records, actor, commit):
             warns.append(f"No Deadline - set to {deadline}. Change it from the client's profile if needed.")
         row.update(stage=stage, stageLabel=stage_label.get(stage, stage))
         ready.append({"row": row, "rec": rec, "extra": extra_notes, "warns": warns, "name": name,
-                      "phone": phone, "email": email, "svc": svc, "status": status, "reg": reg,
-                      "deadline": deadline, "total": total or 0.0, "paid": paid or 0.0,
+                      "phone": phone, "email": email, "alt": alt, "svc": svc, "status": status, "reg": reg,
+                      "deadline": deadline, "money": money,
                       "stage": stage, "people": assign_people, "taskType": task_type})
 
     # ----- 2. insert, oldest registration first, so each client's first work keeps the
@@ -4702,7 +4963,7 @@ def import_old_work(con, records, actor, commit):
     ready.sort(key=lambda x: (x["reg"], x["row"]["row"]))
     seq = 0
     for it in ready:
-        row, rec, warns = it["row"], it["rec"], it["warns"]
+        row, rec, warns, money = it["row"], it["rec"], it["warns"], it["money"]
         did = None
         p_did = by_phone.get(it["phone"]) if it["phone"] else None
         e_did = by_email.get(it["email"].lower()) if it["email"] else None
@@ -4760,8 +5021,10 @@ def import_old_work(con, records, actor, commit):
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (cid, did, project_id, it["name"], it["phone"], it["email"], s("domain"), s("address"),
                      notes, it["reg"], it["deadline"], it["stage"], it["svc"], s("designation"),
-                     s("institution"), s("topic"), s("bdc"), it["total"], _ow_phone(rec.get("altMobile")),
+                     s("institution"), s("topic"), s("bdc"), money["total"], it["alt"],
                      s("department"), s("referredBy"), s("journalName"), created_at))
+        if money["planName"]:
+            con.execute("UPDATE clients SET installment_plan_name=? WHERE id=?", (money["planName"], cid))
 
         # who holds the work right now
         people, stage = it["people"], it["stage"]
@@ -4809,18 +5072,26 @@ def import_old_work(con, records, actor, commit):
         elif it["status"] == "PUBLISHED":
             warns.append("Published but no Journal Name - add it later from the Journals page.")
 
-        # payments: registration = whatever was paid; the rest stays pending
+        # ----- payments: exactly like Add Client -----
+        #   Registration -> payments.reg (paid); every other service stage -> pending row;
+        #   the rest of the Total -> client_installments (custom-titled split-up).
         for k in PAY_KEYS:
-            if k == "reg" and it["paid"] > 0:
+            if k == "reg" and money["reg"] > 0:
                 con.execute("""INSERT INTO payments (client_id, pay_key, status, amount, pay_date)
-                               VALUES (?,?,'paid',?,?)""", (cid, k, it["paid"], it["reg"]))
+                               VALUES (?,?,'paid',?,?)""", (cid, k, money["reg"], money["regDate"]))
             else:
                 con.execute("INSERT INTO payments (client_id, pay_key) VALUES (?,?)", (cid, k))
+        for idx, ins in enumerate(money["inst"]):
+            con.execute("""INSERT INTO client_installments (client_id, title, amount, status, paid_date, sort_order)
+                           VALUES (?,?,?,?,?,?)""",
+                        (cid, ins["title"], ins["amount"], ins["status"], ins["paidDate"], idx))
 
         status_txt = {"NOT_STARTED": "Not Started", "ONGOING": "Ongoing", "PUBLISHED": "Published",
                       "FINISHED": "Finished"}.get(it["status"], it["status"])
         con.execute("INSERT INTO history (client_id, stage, actor, note, created_at) VALUES (?,?,?,?,?)",
-                    (cid, stage, actor, f"Imported from old records (status: {status_txt}).", created_at))
+                    (cid, stage, actor,
+                     f"Imported from old records (status: {status_txt}; total {_ow_rs(money['total'])}, "
+                     f"paid {_ow_rs(money['paid'])}, pending {_ow_rs(money['due'])}).", created_at))
 
         # keep the in-memory indexes current so later rows in the same file link up
         fam_members.setdefault(did, []).append((it["reg"], cid))
@@ -4851,50 +5122,99 @@ def import_old_work(con, records, actor, commit):
     summary["moreWorkForExisting"] = sum(1 for r in report if r["result"] == "added" and not r["clientIsNew"]
                                          and not r.get("sameAsRow"))
     summary["nextWorkInFile"] = sum(1 for r in report if r["result"] == "added" and r.get("sameAsRow"))
+    added = [r for r in report if r["result"] == "added"]
+    summary["totalAmount"] = round(sum(r["total"] for r in added), 2)
+    summary["paidAmount"] = round(sum(r["paidAmt"] for r in added), 2)
+    summary["pendingAmount"] = round(sum(r["due"] for r in added), 2)
     teams = {}
-    for r in report:
-        if r["result"] == "added":
-            t = _stage_team(r["stage"])
-            teams[t] = teams.get(t, 0) + 1
+    for r in added:
+        t = _stage_team(r["stage"])
+        teams[t] = teams.get(t, 0) + 1
     return {"ok": True, "saved": bool(commit), "summary": summary, "teams": teams, "rows": report}
 
 
 # ----- template files -----------------------------------------------------------------
+# Every example adds up: Registration + installments = Total.
 _OW_EXAMPLES = [
     {"name": "EXAMPLE - Santhosh Kumar", "phone": "9876543210", "email": "santhosh@example.com",
-     "altMobile": "", "institution": "Anna University", "department": "CSE", "designation": "PhD Scholar",
+     "institution": "Anna University", "department": "CSE", "designation": "PhD Scholar",
      "address": "Chennai", "service": "Scopus Paid", "domain": "Machine Learning",
      "topic": "Crop disease detection using CNN", "status": "Ongoing", "currentWork": "Implementation",
-     "assignedTo": "Janani", "regDate": "2024-11-04", "deadlineDate": "2025-02-28", "journalName": "",
-     "totalAmount": "70000", "amountPaid": "35000", "bdc": "Priya", "referredBy": "", "notes": "Old sheet row 12"},
+     "assignedTo": "Janani", "regDate": "2024-11-04", "deadlineDate": "2025-02-28",
+     "bdc": "Priya", "notes": "Old sheet row 12",
+     "totalAmount": "70000", "regAmount": "20000", "regPaidDate": "2024-11-04", "splitName": "4 payments",
+     "inst": [("Start Work", "15000", "Paid", "2024-12-10"), ("Code Implementation", "25000", "Pending", ""),
+              ("Paper Delivery", "10000", "Pending", "")]},
     {"name": "EXAMPLE - Santhosh Kumar", "phone": "9876543210", "email": "santhosh@example.com",
-     "altMobile": "", "institution": "Anna University", "department": "CSE", "designation": "PhD Scholar",
+     "institution": "Anna University", "department": "CSE", "designation": "PhD Scholar",
      "address": "Chennai", "service": "EPORS", "domain": "Machine Learning",
-     "topic": "Survey on federated learning", "status": "Published", "currentWork": "",
-     "assignedTo": "", "regDate": "2024-03-15", "deadlineDate": "2024-07-30",
-     "journalName": "Journal of Intelligent Systems", "totalAmount": "35000", "amountPaid": "35000",
-     "bdc": "Priya", "referredBy": "", "notes": "2nd work - same phone, so same Client ID"},
-    {"name": "EXAMPLE - Divya R", "phone": "9840011002", "email": "", "altMobile": "",
-     "institution": "", "department": "", "designation": "", "address": "Madurai", "service": "SCI",
-     "domain": "IoT", "topic": "", "status": "Not Started", "currentWork": "", "assignedTo": "",
-     "regDate": "15-09-2025", "deadlineDate": "", "journalName": "", "totalAmount": "120000",
-     "amountPaid": "25000", "bdc": "", "referredBy": "", "notes": ""},
+     "topic": "Survey on federated learning", "status": "Published",
+     "regDate": "2024-03-15", "deadlineDate": "2024-07-30",
+     "journalName": "Journal of Intelligent Systems", "bdc": "Priya",
+     "notes": "2nd work - same phone, so same Client ID",
+     "totalAmount": "35000", "regAmount": "20000", "regPaidDate": "2024-03-15",
+     "inst": [("Paper Delivery", "15000", "Paid", "2024-07-30")]},
+    {"name": "EXAMPLE - Divya R", "phone": "9840011002", "address": "Madurai", "service": "SCI",
+     "domain": "IoT", "status": "Not Started", "regDate": "15-09-2025",
+     "totalAmount": "120000", "regAmount": "25000", "regPaidDate": "15-09-2025",
+     "inst": [("Start Work", "25000", "Pending", ""), ("Code Implementation", "40000", "Pending", ""),
+              ("Writing Fee", "20000", "Pending", ""), ("Paper Delivery", "10000", "Pending", "")]},
 ]
 
 _OW_HELP = {
     "name": "Required. The client's name.",
     "phone": "10-digit mobile. Phone OR Email is required. A phone/email already in the tool = the SAME client (next work).",
     "email": "Optional if Phone is given. Also used to match an existing client.",
-    "service": "Required. " + " / ".join(OLD_WORK_SERVICE_CHOICES) + "  (EPORS = Scopus paid without implementation)",
+    "altMobile": "Optional. 10-digit number.",
+    "service": "Required. Pick from the list: " + " / ".join(OLD_WORK_SERVICE_CHOICES)
+               + ". See the Services sheet. EPORS = Scopus paid without implementation.",
     "status": "Required. " + " / ".join(OLD_WORK_STATUS_CHOICES),
-    "currentWork": "Only for Ongoing: " + " / ".join(OLD_WORK_CURRENT_CHOICES),
+    "currentWork": "Required for Ongoing: " + " / ".join(OLD_WORK_CURRENT_CHOICES)
+                   + ". Proposal / Implementation only for SCI and Scopus Paid.",
     "assignedTo": "Only for Ongoing: the team member's name (or EMP-ID) exactly as in Team. Several: comma separated.",
     "regDate": "YYYY-MM-DD or DD-MM-YYYY. Blank = today.",
-    "deadlineDate": "YYYY-MM-DD or DD-MM-YYYY. Blank = 30 days after registration.",
+    "deadlineDate": "YYYY-MM-DD or DD-MM-YYYY. Blank = 30 days from today for open work.",
     "journalName": "For Published / Submitted work. Several journals: comma separated.",
-    "totalAmount": "Numbers only, e.g. 70000",
-    "amountPaid": "What the client has paid so far, e.g. 35000",
+    "totalAmount": "Full amount agreed for this work, numbers only, e.g. 70000. Blank = Registration + installments.",
+    "regAmount": "Amount paid at registration, e.g. 20000 (saved as PAID).",
+    "regPaidDate": "Date the registration amount was paid. Blank = Registration Date.",
+    "splitName": "Optional name for the split-up, e.g. \"4 payments\".",
+    "amountPaid": "Old template only. If the split-up is filled it must equal Registration + paid installments.",
 }
+_OW_INST_HELP = {
+    "title": "Name of the installment, e.g. Start Work, Code Implementation, Paper Delivery. Blank = \"Installment N\".",
+    "amount": "Amount of this installment, numbers only.",
+    "status": "Paid or Pending. Blank = Paid if a Paid Date is given, otherwise Pending.",
+    "paidDate": "Only for Paid installments. YYYY-MM-DD or DD-MM-YYYY.",
+}
+_OW_PAY_NAMES = {"reg": "Registration", "start": "Start Work", "code": "Code Implementation",
+                 "writing": "Writing Fee", "paper": "Paper Delivery"}
+_OW_INST_PARTS = [("title", "Title"), ("amount", "Amount"), ("status", "Status"), ("paidDate", "Paid Date")]
+
+
+def _ow_template_columns(n_inst=OLD_WORK_TEMPLATE_INSTALLMENTS):
+    """[(key, header, group)] in template order. key = field name or ("inst", n, part)."""
+    cols = []
+    for f, lbl, _ in OLD_WORK_FIELDS:
+        if f in _OW_NOT_IN_TEMPLATE or f in _OW_MONEY_FIELDS:
+            continue
+        cols.append((f, lbl, "work"))
+    for f in ("totalAmount", "regAmount", "regPaidDate", "splitName"):
+        cols.append((f, dict((x, l) for x, l, _ in OLD_WORK_FIELDS)[f], "money"))
+    for n in range(1, n_inst + 1):
+        for part, plabel in _OW_INST_PARTS:
+            cols.append((("inst", n, part), f"Installment {n} {plabel}", "money"))
+    return cols
+
+
+def _ow_example_value(ex, key):
+    if isinstance(key, tuple):
+        _, n, part = key
+        inst = ex.get("inst") or []
+        if n - 1 < len(inst):
+            return inst[n - 1][[p for p, _ in _OW_INST_PARTS].index(part)]
+        return ""
+    return ex.get(key, "")
 
 
 def _xml_esc(s):
@@ -4911,7 +5231,8 @@ def _xlsx_col(i):
     return s
 
 
-def _xlsx_sheet(rows, widths, styles=None, validations=None, freeze=True, text_cols=()):
+def _xlsx_sheet(rows, widths, styles=None, validations=None, freeze=True, text_cols=(),
+                freeze_rows=1, merges=(), header_row=0):
     """rows: list of lists of str. styles: {(r,c): styleId}. Inline strings only."""
     styles = styles or {}
     cols = "".join(
@@ -4922,7 +5243,7 @@ def _xlsx_sheet(rows, widths, styles=None, validations=None, freeze=True, text_c
     for r, row in enumerate(rows):
         cells = []
         for c, v in enumerate(row):
-            st = styles.get((r, c), 3 if (c in text_cols and r > 0) else 0)
+            st = styles.get((r, c), 3 if (c in text_cols and r > header_row) else 0)
             ref = f"{_xlsx_col(c)}{r + 1}"
             sattr = f' s="{st}"' if st else ""
             if v is None or v == "":
@@ -4930,10 +5251,14 @@ def _xlsx_sheet(rows, widths, styles=None, validations=None, freeze=True, text_c
                     cells.append(f'<c r="{ref}"{sattr}/>')
                 continue
             cells.append(f'<c r="{ref}" t="inlineStr"{sattr}><is><t xml:space="preserve">{_xml_esc(v)}</t></is></c>')
-        ht = ' ht="30" customHeight="1"' if r == 0 else ""
+        ht = ' ht="30" customHeight="1"' if r == header_row else ""
         body.append(f'<row r="{r + 1}"{ht}>{"".join(cells)}</row>')
-    pane = ('<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" '
-            'activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>') if freeze else ""
+    pane = (f'<sheetViews><sheetView workbookViewId="0"><pane ySplit="{freeze_rows}" '
+            f'topLeftCell="A{freeze_rows + 1}" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+            ) if freeze else ""
+    mg = ""
+    if merges:
+        mg = f'<mergeCells count="{len(merges)}">' + "".join(f'<mergeCell ref="{m}"/>' for m in merges) + "</mergeCells>"
     dv = ""
     if validations:
         items = "".join(
@@ -4944,33 +5269,135 @@ def _xlsx_sheet(rows, widths, styles=None, validations=None, freeze=True, text_c
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
             'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            f'{pane}<cols>{cols}</cols><sheetData>{"".join(body)}</sheetData>{dv}</worksheet>')
+            f'{pane}<cols>{cols}</cols><sheetData>{"".join(body)}</sheetData>{mg}{dv}</worksheet>')
+
+
+def _xlsx_package(sheets, styles_xml):
+    """sheets: [(name, sheet_xml)] -> .xlsx bytes."""
+    n = len(sheets)
+    files = {
+        "[Content_Types].xml":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            + "".join(f'<Override PartName="/xl/worksheets/sheet{i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                      for i in range(n))
+            + '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+            '</Types>',
+        "_rels/.rels":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            '</Relationships>',
+        "xl/workbook.xml":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+            + "".join(f'<sheet name="{_xml_esc(nm)}" sheetId="{i + 1}" r:id="rId{i + 1}"/>' for i, (nm, _) in enumerate(sheets))
+            + '</sheets></workbook>',
+        "xl/_rels/workbook.xml.rels":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            + "".join(f'<Relationship Id="rId{i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i + 1}.xml"/>'
+                      for i in range(n))
+            + f'<Relationship Id="rId{n + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+            '</Relationships>',
+        "xl/styles.xml": styles_xml,
+    }
+    for i, (_, xml) in enumerate(sheets):
+        files[f"xl/worksheets/sheet{i + 1}.xml"] = xml
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, content in files.items():
+            z.writestr(name, content)
+    return buf.getvalue()
+
+
+# cellXfs: 0 normal | 1 header (white on teal) | 2 example (grey italic, text) | 3 text
+#          4 group band WORK (white on dark teal) | 5 header MONEY (white on green)
+#          6 group band MONEY (white on dark green) | 7 bold section title
+_OW_STYLES_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    '<fonts count="4"><font><sz val="11"/><name val="Calibri"/></font>'
+    '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>'
+    '<font><i/><sz val="11"/><color rgb="FF7F7F7F"/><name val="Calibri"/></font>'
+    '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
+    '<fills count="6"><fill><patternFill patternType="none"/></fill>'
+    '<fill><patternFill patternType="gray125"/></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FF0E7490"/><bgColor indexed="64"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FF0B4F5E"/><bgColor indexed="64"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FF15803D"/><bgColor indexed="64"/></patternFill></fill>'
+    '<fill><patternFill patternType="solid"><fgColor rgb="FF14532D"/><bgColor indexed="64"/></patternFill></fill></fills>'
+    '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+    '<cellXfs count="8"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+    '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1">'
+    '<alignment vertical="center" wrapText="1"/></xf>'
+    '<xf numFmtId="49" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>'
+    '<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+    '<xf numFmtId="0" fontId="1" fillId="3" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1">'
+    '<alignment horizontal="center" vertical="center"/></xf>'
+    '<xf numFmtId="0" fontId="1" fillId="4" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1">'
+    '<alignment vertical="center" wrapText="1"/></xf>'
+    '<xf numFmtId="0" fontId="1" fillId="5" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1">'
+    '<alignment horizontal="center" vertical="center"/></xf>'
+    '<xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>'
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+    '</styleSheet>')
 
 
 def build_old_work_xlsx():
-    fields = [f for f, _, _ in OLD_WORK_FIELDS]
-    headers = [lbl + (" *" if f in ("name", "service", "status") else "") for f, lbl, _ in OLD_WORK_FIELDS]
-    data = [headers] + [[ex.get(f, "") for f in fields] for ex in _OW_EXAMPLES]
-    widths = [max(12, min(34, len(h) + 4)) for h in headers]
+    cols = _ow_template_columns()
+    keys = [k for k, _, _ in cols]
+    required = ("name", "service", "status")
+    headers = [lbl + (" *" if k in required else "") for k, lbl, _ in cols]
+    n_work = sum(1 for _, _, g in cols if g == "work")
+    group = [""] * len(cols)
+    group[0] = "CLIENT & WORK DETAILS"
+    group[n_work] = "AMOUNT SPLIT-UP  (Registration Amount + all installments = Total Amount)"
+    data = [group, headers] + [[_ow_example_value(ex, k) for k in keys] for ex in _OW_EXAMPLES]
+    widths = []
+    for k, h, _ in cols:
+        w = max(12, min(30, len(h) + 4))
+        if isinstance(k, tuple):
+            w = {"title": 22, "amount": 13, "status": 12, "paidDate": 15}[k[2]]
+        widths.append(w)
     for f, w in (("name", 26), ("topic", 34), ("email", 26), ("service", 16), ("status", 14),
-                 ("currentWork", 20), ("assignedTo", 18), ("journalName", 28), ("notes", 30)):
-        widths[fields.index(f)] = w
-    styles = {(0, c): 1 for c in range(len(headers))}
-    for r in range(1, len(data)):
-        for c in range(len(headers)):
+                 ("currentWork", 20), ("assignedTo", 18), ("journalName", 28), ("notes", 30),
+                 ("totalAmount", 14), ("regAmount", 14), ("regPaidDate", 16), ("splitName", 16)):
+        widths[keys.index(f)] = w
+    styles = {}
+    for c, (_, _, g) in enumerate(cols):
+        styles[(0, c)] = 4 if g == "work" else 6
+        styles[(1, c)] = 1 if g == "work" else 5
+    for r in range(2, len(data)):
+        for c in range(len(cols)):
             styles[(r, c)] = 2               # example rows in grey italics
-    col = lambda f: _xlsx_col(fields.index(f))
+    merges = [f"A1:{_xlsx_col(n_work - 1)}1", f"{_xlsx_col(n_work)}1:{_xlsx_col(len(cols) - 1)}1"]
+    col = lambda k: _xlsx_col(keys.index(k))
     validations = [
-        (f"{col('service')}2:{col('service')}2000", OLD_WORK_SERVICE_CHOICES),
-        (f"{col('status')}2:{col('status')}2000", OLD_WORK_STATUS_CHOICES),
-        (f"{col('currentWork')}2:{col('currentWork')}2000", OLD_WORK_CURRENT_CHOICES),
+        (f"{col('service')}3:{col('service')}2002", OLD_WORK_SERVICE_CHOICES),
+        (f"{col('status')}3:{col('status')}2002", OLD_WORK_STATUS_CHOICES),
+        (f"{col('currentWork')}3:{col('currentWork')}2002", OLD_WORK_CURRENT_CHOICES),
     ]
-    text_cols = (fields.index("phone"), fields.index("altMobile"))
-    sheet1 = _xlsx_sheet(data, widths, styles, validations, text_cols=text_cols)
+    for n in range(1, OLD_WORK_TEMPLATE_INSTALLMENTS + 1):
+        c = col(("inst", n, "status"))
+        validations.append((f"{c}3:{c}2002", OLD_WORK_INST_STATUS_CHOICES))
+    text_cols = (keys.index("phone"), keys.index("altMobile"))
+    sheet1 = _xlsx_sheet(data, widths, styles, validations, text_cols=text_cols,
+                         freeze_rows=2, merges=merges, header_row=1)
 
     help_rows = [["Column", "What to fill"]]
-    for f, lbl, _ in OLD_WORK_FIELDS:
-        help_rows.append([lbl, _OW_HELP.get(f, "Optional.")])
+    for k, lbl, _ in cols:
+        if isinstance(k, tuple):
+            if k[1] > 1:
+                continue
+            help_rows.append([lbl.replace("1", "N"), _OW_INST_HELP[k[2]]])
+        else:
+            help_rows.append([lbl, _OW_HELP.get(k, "Optional.")])
     help_rows += [
         ["", ""],
         ["HOW IT WORKS", ""],
@@ -4983,72 +5410,46 @@ def build_old_work_xlsx():
                     "If nobody is named, it waits in that step's 'ready to assign' queue."],
         ["Published / Finished", "Saved as Completed (Published also sets the journal status to Published)."],
         ["Same file twice?", "Safe - a row already imported (same client + service + topic + date) is skipped."],
+        ["", ""],
+        ["AMOUNT SPLIT-UP", ""],
+        ["The rule", "Registration Amount + Installment 1 + Installment 2 + ... = Total Amount. "
+                     "If it doesn't add up to the rupee, the row is shown as an error and NOT imported."],
+        ["Registration", "Saved as the Registration payment (PAID) on Registration Paid Date."],
+        ["Installments", "Saved as the client's split-up, exactly like Add Client. Paid ones count as collected "
+                         "on their Paid Date; Pending ones show under Pending Amount for Accounts to collect."],
+        ["No installments?", "The balance (Total - Registration) is saved as one pending \"Balance\" installment."],
+        ["More than 6?", f"Add more columns named \"Installment 7 Title\", \"Installment 7 Amount\", "
+                         f"\"Installment 7 Status\", \"Installment 7 Paid Date\" (and 8, 9 ...)."],
+        ["Example", "Total 70000 = Registration 20000 (paid) + Start Work 15000 (paid) + Code Implementation 25000 "
+                    "(pending) + Paper Delivery 10000 (pending)  ->  Paid 35000, Pending 35000."],
     ]
     hstyles = {(0, 0): 1, (0, 1): 1}
     for r, row in enumerate(help_rows):
-        if row[0] in ("HOW IT WORKS",):
-            hstyles[(r, 0)] = 1
-    sheet2 = _xlsx_sheet(help_rows, [26, 110], hstyles, freeze=True)
+        if row[0] in ("HOW IT WORKS", "AMOUNT SPLIT-UP"):
+            hstyles[(r, 0)] = 7
+    sheet2 = _xlsx_sheet(help_rows, [26, 120], hstyles, freeze=True)
 
-    styles_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                  '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-                  '<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font>'
-                  '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>'
-                  '<font><i/><sz val="11"/><color rgb="FF7F7F7F"/><name val="Calibri"/></font></fonts>'
-                  '<fills count="3"><fill><patternFill patternType="none"/></fill>'
-                  '<fill><patternFill patternType="gray125"/></fill>'
-                  '<fill><patternFill patternType="solid"><fgColor rgb="FF0E7490"/><bgColor indexed="64"/></patternFill></fill></fills>'
-                  '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
-                  '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-                  '<cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
-                  '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1">'
-                  '<alignment vertical="center" wrapText="1"/></xf>'
-                  '<xf numFmtId="49" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>'
-                  '<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>'
-                  '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
-                  '</styleSheet>')
-    files = {
-        "[Content_Types].xml":
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-            '<Default Extension="xml" ContentType="application/xml"/>'
-            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-            '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-            '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
-            '</Types>',
-        "_rels/.rels":
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
-            '</Relationships>',
-        "xl/workbook.xml":
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
-            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            '<sheets><sheet name="Old Work" sheetId="1" r:id="rId1"/>'
-            '<sheet name="Instructions" sheetId="2" r:id="rId2"/></sheets></workbook>',
-        "xl/_rels/workbook.xml.rels":
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>'
-            '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
-            '</Relationships>',
-        "xl/styles.xml": styles_xml,
-        "xl/worksheets/sheet1.xml": sheet1,
-        "xl/worksheets/sheet2.xml": sheet2,
-    }
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for name, content in files.items():
-            z.writestr(name, content)
-    return buf.getvalue()
+    svc_rows = [["Type this in Service", "Service in the tool", "Proposal + Implementation?",
+                 "Current Work allowed (Ongoing)", "Usual stage split-up (guide only - use the amounts agreed)"]]
+    for typed, key in OLD_WORK_SERVICES:
+        conf = SERVICES[key]
+        guide = " + ".join(f"{_OW_PAY_NAMES[k]} {int(v)}" for k, v in conf["amounts"].items())
+        svc_rows.append([typed, conf["label"], "Yes" if conf["hasImplementation"] else "No - starts at Paper Writing",
+                         ", ".join(OLD_WORK_CURRENT_CHOICES if conf["hasImplementation"] else OLD_WORK_CURRENT_NO_IMPL),
+                         guide])
+    sheet3 = _xlsx_sheet(svc_rows, [22, 42, 28, 70, 80], {(0, c): 1 for c in range(5)}, freeze=True)
+    return _xlsx_package([("Old Work", sheet1), ("Instructions", sheet2), ("Services", sheet3)], _OW_STYLES_XML)
 
 
 def build_old_work_json():
     labels = {f: lbl for f, lbl, _ in OLD_WORK_FIELDS}
+
+    def rec(ex):
+        out = {f: ex.get(f, "") for f, _, _ in OLD_WORK_FIELDS if f not in _OW_NOT_IN_TEMPLATE}
+        out["installments"] = [{"title": t, "amount": a, "status": st, "paidDate": d}
+                               for t, a, st, d in (ex.get("inst") or [])]
+        return out
+
     doc = {
         "_instructions": {
             "howTo": "Add one object per WORK inside \"records\". Delete the EXAMPLE records (they are ignored anyway). "
@@ -5056,13 +5457,18 @@ def build_old_work_json():
                      "(their 2nd / 3rd work).",
             "required": ["name", "phone or email", "service", "status"],
             "service": OLD_WORK_SERVICE_CHOICES,
-            "serviceNote": "EPORS = Scopus paid without implementation (same service).",
+            "serviceNote": "EPORS = Scopus paid without implementation. Proposal / Implementation are only for SCI "
+                           "and Scopus Paid.",
             "status": OLD_WORK_STATUS_CHOICES,
-            "currentWork": "Only for Ongoing: " + ", ".join(OLD_WORK_CURRENT_CHOICES),
+            "currentWork": "Required for Ongoing: " + ", ".join(OLD_WORK_CURRENT_CHOICES),
             "dates": "YYYY-MM-DD or DD-MM-YYYY",
-            "fields": {f: f"{labels[f]} - {_OW_HELP.get(f, 'Optional.')}" for f, _, _ in OLD_WORK_FIELDS},
+            "amountSplitUp": "regAmount + every installments[].amount must equal totalAmount. "
+                             "installments[].status = Paid or Pending; paidDate only for Paid.",
+            "fields": {f: f"{labels[f]} - {_OW_HELP.get(f, 'Optional.')}" for f, _, _ in OLD_WORK_FIELDS
+                       if f not in _OW_NOT_IN_TEMPLATE},
+            "installmentFields": _OW_INST_HELP,
         },
-        "records": [{f: ex.get(f, "") for f, _, _ in OLD_WORK_FIELDS} for ex in _OW_EXAMPLES],
+        "records": [rec(ex) for ex in _OW_EXAMPLES],
     }
     return json.dumps(doc, indent=2, ensure_ascii=False).encode("utf-8")
 
@@ -5165,7 +5571,8 @@ def _rows_from_upload(filename, b64, csv_text):
         except Exception:
             raise ApiError("Could not read that file — it may be corrupted.")
         if filename.endswith(".csv") or filename.endswith(".tsv"):
-            return list(csv.reader(io.StringIO(raw.decode("utf-8", errors="ignore"))))
+            return list(csv.reader(io.StringIO(raw.decode("utf-8-sig", errors="ignore")),
+                                   delimiter="\t" if filename.endswith(".tsv") else ","))
         if filename.endswith(".xlsx"):
             return read_xlsx_rows(raw)
         raise ApiError("Please upload a .xlsx or .csv file.")
@@ -10294,8 +10701,9 @@ def _handle_action_core(action, d, ip=""):
                 raise ApiError("Old .xls files can't be read - open it in Excel and \"Save As\" .xlsx, then upload again.")
             else:
                 raise ApiError("Upload the filled template as .xlsx, .csv or .json.")
-            actor = {"technical_manager": "Technical Manager", "md_admin": "MD / Admin",
-                     "super_admin": "Super Admin"}.get(d.get("role") or "", "Technical Manager") + " (import)"
+            actor = {"technical_manager": "Technical Manager", "marketing_manager": "Marketing Manager",
+                     "journal_manager": "Journal Manager", "md_admin": "MD / Admin",
+                     "super_admin": "Super Admin"}.get(d.get("role") or "", "Import") + " (import)"
             try:
                 return import_old_work(con, records, actor, commit=bool(d.get("commit")))
             except Exception:
