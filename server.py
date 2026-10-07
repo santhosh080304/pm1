@@ -714,6 +714,7 @@ ACTION_ROLES = {
     "delete_client_note": _R_MKT_MGMT,
     "add_client_referral": _R_MARKETING,
     "delete_client_referral": _R_MKT_MGMT,
+    "link_client_referral": _R_MARKETING,
     "add_client_document": _R_ALL_STAFF,
     "delete_client_document": _R_MKT_MGMT + ("technical_manager", "journal_manager"),
     "add_service_item": _R_MARKETING,
@@ -979,7 +980,7 @@ def session_identity(session):
 # "telecaller" login may do; BDC staff get them too, but only on their OWN leads
 # (see bdc_owns_client). Technical-pipeline steps are deliberately not included.
 BDC_EMPLOYEE_ACTIONS = frozenset({
-    "add_client", "update_client", "add_call", "add_client_referral",
+    "add_client", "update_client", "add_call", "add_client_referral", "link_client_referral",
     "add_service_item", "delete_service_item", "schedule_demo", "cancel_demo_schedule",
     "import_clients", "import_clients_from_url", "bulk_import", "bulk_import_from_url",
     "send_to_tl", "send_client_invite", "create_invite_link", "admin_reset_client_password",
@@ -1630,6 +1631,64 @@ def db():
     return PGConnection(conn)
 
 
+def _referral_family_id(con, client_id):
+    r = con.execute("SELECT id, display_id FROM clients WHERE id=?", (client_id,)).fetchone()
+    return (r["display_id"] or r["id"]) if r else client_id
+
+
+def next_referral_code(con, client_id):
+    """CL-1001 (or any of its works, CL-1001-S2 ...) -> next free CL-1001-RF<n>."""
+    fam = _referral_family_id(con, client_id)
+    prefix = f"{fam}-RF"
+    n = 0
+    for r in con.execute("SELECT ref_code FROM client_referrals WHERE ref_code LIKE ?", (prefix + "%",)):
+        m = re.match(r"^" + re.escape(prefix) + r"(\d+)$", r["ref_code"] or "")
+        if m:
+            n = max(n, int(m.group(1)))
+    return f"{prefix}{n + 1}"
+
+
+def _backfill_referral_codes(con):
+    rows = con.execute("""SELECT id, client_id FROM client_referrals
+                          WHERE ref_code IS NULL OR ref_code=''
+                          ORDER BY created_at ASC, id ASC""").fetchall()
+    for r in rows:
+        con.execute("UPDATE client_referrals SET ref_code=? WHERE id=?",
+                    (next_referral_code(con, r["client_id"]), r["id"]))
+
+
+_REF_CODE_RE = re.compile(r"\b(CL-\d+(?:-S\d+)?-RF\d+)\b", re.I)
+
+
+def link_referral_from_referred_by(con, referred_by, client_id):
+    """"Referred by" holds a referral ID (CL-1001-RF2) -> link that referral to this new
+    client's family. Never re-links a referral already linked to someone else, and never
+    links a client to its own referral list. Returns the code linked, or ""."""
+    m = _REF_CODE_RE.search(referred_by or "")
+    if not m:
+        return ""
+    code = m.group(1).upper()
+    r = con.execute("SELECT id, client_id, linked_client FROM client_referrals WHERE UPPER(ref_code)=?",
+                    (code,)).fetchone()
+    if not r:
+        return ""
+    fam = _referral_family_id(con, client_id)
+    if _referral_family_id(con, r["client_id"]) == fam:
+        return ""
+    if (r["linked_client"] or "") not in ("", fam):
+        return ""
+    con.execute("UPDATE client_referrals SET linked_client=? WHERE id=?", (fam, r["id"]))
+    return code
+
+
+def _referral_actor(d):
+    name = (d.get("empName") or "").strip()
+    if name:
+        return name
+    role = d.get("role") or ""
+    return "BDC" if role == "telecaller" else STAFF_ROLE_LABELS.get(role, role)
+
+
 def init_db():
     con = db()
     con.executescript(f"""
@@ -1982,6 +2041,15 @@ def init_db():
                            ON CONFLICT (role) DO NOTHING""", (role, label))
     con.commit()
 
+    # Referrals: a client's referred contacts get their own ID - the referring client's
+    # Client ID + "-RF" + a running number (CL-1001-RF1, CL-1001-RF2 ...), shared by every
+    # work of that client (CL-1001, CL-1001-S2 ...). Rows added before this get a code too.
+    con.execute("ALTER TABLE client_referrals ADD COLUMN IF NOT EXISTS ref_code TEXT DEFAULT ''")
+    con.execute("ALTER TABLE client_referrals ADD COLUMN IF NOT EXISTS added_by TEXT DEFAULT ''")
+    # When the referred person becomes a client, the referral points at their Client ID
+    # (family id, e.g. CL-1255) so the Referrals tab can open their projects.
+    con.execute("ALTER TABLE client_referrals ADD COLUMN IF NOT EXISTS linked_client TEXT DEFAULT ''")
+    _backfill_referral_codes(con)
     con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS enabled INTEGER NOT NULL DEFAULT 1")
     con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT DEFAULT ''")
     con.commit()
@@ -5025,6 +5093,10 @@ def import_old_work(con, records, actor, commit):
                      s("department"), s("referredBy"), s("journalName"), created_at))
         if money["planName"]:
             con.execute("UPDATE clients SET installment_plan_name=? WHERE id=?", (money["planName"], cid))
+        if s("referredBy"):
+            linked = link_referral_from_referred_by(con, s("referredBy"), cid)
+            if linked:
+                warns.append(f"Linked to referral {linked}.")
 
         # who holds the work right now
         people, stage = it["people"], it["stage"]
@@ -5703,10 +5775,11 @@ def _import_referrals_rows(con, rows, default_client_id=""):
             skipped += 1; errors.append(f"Row {idx}: client '{ref}' not found, skipped."); continue
         if not name:
             skipped += 1; errors.append(f"Row {idx}: missing a contact name, skipped."); continue
-        con.execute("""INSERT INTO client_referrals (client_id, designation, name, email, mobile)
-                       VALUES (?,?,?,?,?)""",
-                    (c["id"], (rec.get("designation") or "").strip(), name,
-                     (rec.get("email") or "").strip(), (rec.get("mobile") or "").strip()))
+        con.execute("""INSERT INTO client_referrals (client_id, designation, name, email, mobile, ref_code, added_by)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (c["id"], (rec.get("designation") or "").strip(), name[:200],
+                     (rec.get("email") or "").strip(), (rec.get("mobile") or "").strip(),
+                     next_referral_code(con, c["id"]), "Import"))
         added += 1
     con.commit()
     return {"ok": True, "added": added, "skipped": skipped, "errors": errors[:30]}
@@ -6748,7 +6821,8 @@ def _handle_action_core(action, d, ip=""):
                 """SELECT id, client_id, title, description, created_by, created_at
                    FROM client_notes_v2 ORDER BY created_at DESC""")]
             client_refs = [dict(r) for r in con.execute(
-                """SELECT id, client_id, designation, name, email, mobile, created_at
+                """SELECT id, client_id, designation, name, email, mobile, ref_code, added_by,
+                          linked_client, created_at
                    FROM client_referrals ORDER BY created_at DESC""")]
             clients_out = all_clients(con)
             sends_out = work_sends(con)
@@ -6961,6 +7035,7 @@ def _handle_action_core(action, d, ip=""):
 
             actor = (d.get("actorLabel") or "").strip() or "Telecaller"
             con.execute("INSERT INTO history (client_id, stage, actor) VALUES (?,'NEW',?)", (cid, actor))
+            link_referral_from_referred_by(con, (d.get("referredBy") or "").strip(), cid)
             # Start the stage-reminder clock: the Telecaller now has one step-time
             # to send this lead to the Marketing TL.
             con.execute("UPDATE clients SET stage_entered_at=? WHERE id=?", (now_str(), cid))
@@ -7185,6 +7260,8 @@ def _handle_action_core(action, d, ip=""):
 
             set_clause = ", ".join(f"{col}=?" for col in updates)
             con.execute(f"UPDATE clients SET {set_clause} WHERE id=?", (*updates.values(), c["id"]))
+            if updates.get("referred_by"):
+                link_referral_from_referred_by(con, updates["referred_by"], c["id"])
 
             actor = (d.get("actorLabel") or "").strip() or "Staff"
             note_parts = changes + ([merge_note] if merge_note else [])
@@ -7814,13 +7891,56 @@ def _handle_action_core(action, d, ip=""):
                 raise ApiError("Missing client id.")
             if not name:
                 raise ApiError("Give the contact a name.")
+            if len(name) > 200:
+                raise ApiError("That name is too long.")
             get_client(con, client_id)
-            cur = con.execute("""INSERT INTO client_referrals (client_id, designation, name, email, mobile)
-                                  VALUES (?,?,?,?,?)""",
-                               (client_id, (d.get("designation") or "").strip(), name,
-                                (d.get("email") or "").strip(), (d.get("mobile") or "").strip()))
+            # Only the name is needed - email / mobile are optional and not asked for.
+            email = (d.get("email") or "").strip()
+            mobile = re.sub(r"\D", "", str(d.get("mobile") or ""))
+            if email and not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+                raise ApiError("Enter a valid email address, or leave it empty.")
+            if mobile and not re.match(r"^\d{10}$", mobile):
+                raise ApiError("Enter a 10-digit mobile number, or leave it empty.")
+            code = next_referral_code(con, client_id)
+            cur = con.execute("""INSERT INTO client_referrals
+                                 (client_id, designation, name, email, mobile, ref_code, added_by)
+                                 VALUES (?,?,?,?,?,?,?)""",
+                              (client_id, (d.get("designation") or "").strip()[:120], name, email, mobile,
+                               code, _referral_actor(d)))
             con.commit()
-            return {"ok": True, "id": cur.lastrowid}
+            return {"ok": True, "id": cur.lastrowid, "refCode": code}
+
+        if action == "link_client_referral":
+            # Link a referral to the client the referred person became (or unlink it).
+            rid = d.get("id")
+            r = con.execute("SELECT * FROM client_referrals WHERE id=?", (rid,)).fetchone() if rid else None
+            if not r:
+                raise ApiError("Referral not found.")
+            # clientId = the REFERRING client (checked for BDC ownership); must match.
+            if (d.get("clientId") or "").strip() and \
+                    _referral_family_id(con, d.get("clientId").strip()) != _referral_family_id(con, r["client_id"]):
+                raise ApiError("That referral belongs to a different client.", 403)
+            ref = (d.get("clientRef") or "").strip()
+            if not ref:
+                con.execute("UPDATE client_referrals SET linked_client='' WHERE id=?", (r["id"],))
+                con.commit()
+                return {"ok": True, "linkedClient": ""}
+            target = _find_client(con, ref)
+            if not target:
+                raise ApiError(f"No client found for \"{ref}\" - use their Client ID (e.g. CL-1255) or phone number.")
+            fam = target["display_id"] or target["id"]
+            if fam == _referral_family_id(con, r["client_id"]):
+                raise ApiError("A client can't be their own referral.")
+            other = con.execute("""SELECT ref_code FROM client_referrals WHERE linked_client=? AND id<>?""",
+                                (fam, r["id"])).fetchone()
+            if other:
+                raise ApiError(f"{fam} is already linked to referral {other['ref_code']}.")
+            con.execute("UPDATE client_referrals SET linked_client=? WHERE id=?", (fam, r["id"]))
+            # fill an empty "Referred by" on that client's works so both sides agree
+            con.execute("""UPDATE clients SET referred_by=? WHERE (display_id=? OR id=?)
+                           AND (referred_by IS NULL OR referred_by='')""", (r["ref_code"], fam, fam))
+            con.commit()
+            return {"ok": True, "linkedClient": fam}
 
         if action == "delete_client_referral":
             rid = d.get("id")

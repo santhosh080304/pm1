@@ -64,3 +64,50 @@ Roles: Super Admin, MD / Admin, Marketing Manager, Marketing TL, Technical Manag
   Service is also in the Search box and in the Clients / Projects Export (.csv).
 
   FILE CHANGED: index.html
+
+
+REFERRALS  (Client profile > Referrals tab, and the client drawer)
+=================================================================
+  * Who can ADD a referral: BDC (shared BDC login and individual BDC staff - on their own
+    leads), Marketing TL, Marketing Manager, MD / Admin, Super Admin.
+    Everyone else (Technical Manager / TL, Journal Manager, Accounts ...) sees the list
+    read-only - no "+ Add referral" button, and the server refuses the action.
+    Removing a referral: Marketing TL, Marketing Manager, MD / Admin, Super Admin.
+  * Only the NAME is required. Designation is optional. Email and phone are not asked.
+  * Every referral gets its own ID: the referring client's ID + "-RF" + number
+      Client A = CL-1001  ->  CL-1001-RF1, CL-1001-RF2, CL-1001-RF3 ...
+    The ID is shown before saving, is never reused after a delete, and existing
+    referrals got their IDs automatically (oldest first).
+  * Second / third work: referrals belong to the CLIENT, so CL-1001, CL-1001-S2, CL-1001-S3
+    all show the same referral list and the numbering continues (a referral added while
+    viewing CL-1001-S2 is still CL-1001-RF<n>). The table shows which work it was added on.
+  * BDC and Marketing TL (who work from the client drawer) now have a "Referrals" section
+    there with "+ Add referral".
+  * Table: Referral ID | Name | Designation | (Contact - only if old data has it) |
+           Added on work (only for clients with 2+ works) | Added by | Added on.
+  Database: client_referrals gets 2 columns (ref_code, added_by) - added automatically
+  on start-up, nothing to run by hand.
+  FILES CHANGED: server.py, index.html
+
+
+REFERRALS - OPEN A REFERRED PERSON'S PROJECTS
+=============================================
+  * Referrals tab is now a simple list: Referral ID | Name | Client (their Client ID +
+    number of projects, or "Not registered yet") | Added by | Added on.
+    The line above it says e.g. "Arun (CL-1001) referred 5 people - 2 registered as clients".
+  * Click a name -> a window with that person's Projects (Project | Service | Code | Start |
+    Finish | Stage - same table as the profile's Projects tab). Click a project to open it,
+    or "Open client profile".
+  * How a referral gets linked to the client the person became:
+      - AUTOMATIC: when a client is added (Add Client / Import Old Work) or edited with the
+        referral ID in "Referred by" (e.g. CL-1001-RF2).
+      - "+ Register as new client" in the window opens Add Client with the name and
+        "Referred by = CL-1001-RF2" already filled, so saving links it.
+      - "Already a client? Link by Client ID or phone" for people already in the tool.
+      - "Unlink" if it was linked to the wrong person.
+    Rules: a client can't be their own referral; one client is linked to only one referral.
+    Link / register / unlink: BDC (own leads), Marketing TL, Marketing Manager, MD / Admin,
+    Super Admin. Other roles see the list and the projects read-only.
+  * BDC / Marketing TL: same window from the Referrals section of the client drawer.
+  Database: client_referrals gets 1 more column (linked_client) - added automatically.
+  FILES CHANGED: server.py, index.html

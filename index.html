@@ -9151,74 +9151,213 @@ function admProfileProfileTab(c){
     <div class="adm-kpi"><h4>Last Note</h4><div class="note" style="font-size:13px;color:var(--text)">${esc(lastNote)||"No notes yet."}</div></div>
   </div>`;
 }
-function admProfileProjectsTab(c){
-  const fam = clients.filter(x=>(x.displayId||x.id)===(c.displayId||c.id));
-  const rows = fam.map(x=>`<tr onclick="admOpenProject(${jsq(x.id)})">
+// One client's works (CL-1255, CL-1255-S2 ...) as Project | Service | Code | Start | Finish | Stage.
+// Used by the profile's Projects tab and by the Referrals window.
+function familyProjectRowsHtml(famId, rowClick){
+  const fam = clients.filter(x=>clientFamilyId(x)===famId)
+    .sort((a,b)=> String(admClientRegDate(a)||"").localeCompare(String(admClientRegDate(b)||"")));
+  return {count: fam.length, rows: fam.map(x=>`<tr onclick="${rowClick(x)}">
     <td><b>${esc(x.domain||x.topic||"—")}</b></td>
     <td>${serviceCellHtml(x)}</td>
     <td>${x.displayId||x.id}${x.projectId?`<br><small style="color:var(--muted)">${esc(x.projectId)}</small>`:""}</td>
     <td>${fmtDate(admClientRegDate(x))}</td>
     <td>${fmtDate(x.deadlineDate)}</td>
     <td><span class="stage-chip ${chipClass(x.stage)}">${STAGE_LABEL[x.stage]}</span></td>
-  </tr>`).join("");
-  return `<div class="adm-panel"><div class="adm-panel-head"><h3>Projects</h3><span class="badge b-purp">${fam.length}</span></div>
-    <div class="adm-table-wrap"><table class="adm-table"><thead><tr><th>Project</th><th>Service</th><th>Code</th><th>Start</th><th>Finish</th><th>Stage</th></tr></thead><tbody>${rows}</tbody></table></div>
+  </tr>`).join("")};
+}
+const FAMILY_PROJECTS_HEAD = `<thead><tr><th>Project</th><th>Service</th><th>Code</th><th>Start</th><th>Finish</th><th>Stage</th></tr></thead>`;
+function admProfileProjectsTab(c){
+  const t = familyProjectRowsHtml(clientFamilyId(c), x=>`admOpenProject(${jsq(x.id)})`);
+  return `<div class="adm-panel"><div class="adm-panel-head"><h3>Projects</h3><span class="badge b-purp">${t.count}</span></div>
+    <div class="adm-table-wrap"><table class="adm-table">${FAMILY_PROJECTS_HEAD}<tbody>${t.rows}</tbody></table></div>
   </div>`;
 }
+/* ---------- REFERRALS ----------
+   A client's referred contacts. Each one gets its own ID: the referring client's ID +
+   "-RF" + a running number (CL-1001-RF1, CL-1001-RF2 ...), made by the server.
+   Referrals belong to the CLIENT, not to one work: CL-1001 and its 2nd / 3rd works
+   (CL-1001-S2, -S3) all show the same list, and numbering carries on across them.
+   Only the name is needed. Adding is for BDC, Marketing TL, Marketing Manager,
+   MD / Admin and Super Admin (server: add_client_referral = _R_MARKETING; a BDC only
+   on their own leads); removing is for Marketing TL / Manager and Admin. Every other
+   role sees the list read-only. */
+const REFERRAL_ADD_ROLES = ["telecaller","marketing_tl","marketing_manager"];
+const REFERRAL_DELETE_ROLES = ["marketing_tl","marketing_manager"];
+function canAddReferral(){ return isAdminRole() || REFERRAL_ADD_ROLES.includes(permRole()); }
+function canDeleteReferral(){ return isAdminRole() || REFERRAL_DELETE_ROLES.includes(permRole()); }
+function clientFamilyId(c){ return c ? (c.displayId || c.id) : ""; }
+function familyReferrals(c){
+  const fam = clientFamilyId(c);
+  const famIds = new Set(clients.filter(x=>clientFamilyId(x)===fam).map(x=>x.id));
+  famIds.add(c.id);
+  return clientReferrals.filter(r=>famIds.has(r.client_id))
+    .sort((a,b)=> referralNo(a) - referralNo(b) || String(a.created_at||"").localeCompare(String(b.created_at||"")));
+}
+function referralNo(r){ const m = /-RF(\d+)$/.exec(r.ref_code||""); return m ? parseInt(m[1],10) : 9999; }
+function referralWorkLabel(r){
+  const w = clients.find(x=>x.id===r.client_id);
+  return w ? (w.id + (w.projectId ? " · " + w.projectId : "")) : r.client_id;
+}
+function referralLinkedWorks(r){
+  return r && r.linked_client ? clients.filter(x=>clientFamilyId(x)===r.linked_client) : [];
+}
+function referralStatusHtml(r){
+  if(!r.linked_client) return `<span style="color:var(--muted);font-size:12.5px">Not registered yet</span>`;
+  const n = referralLinkedWorks(r).length;
+  return `<span class="badge b-paid">${esc(r.linked_client)}</span>
+    <small style="color:var(--muted);margin-left:6px">${n} project${n===1?"":"s"}</small>`;
+}
 function admProfileReferralsTab(c){
-  const refs = clientReferrals.filter(r=>r.client_id===c.id);
-  const rows = refs.map(r=>`<tr>
-    <td><b>${esc(r.designation||"—")}</b></td>
-    <td>${esc(r.name)}</td>
-    <td>${esc(r.email||"—")}</td>
-    <td>${esc(r.mobile||"—")}</td>
+  const all = familyReferrals(c);
+  const q = (searchQuery||"").trim().toLowerCase();
+  const refs = q ? all.filter(r=>((r.ref_code||"")+" "+(r.name||"")+" "+(r.linked_client||"")+" "+(r.added_by||"")).toLowerCase().includes(q)) : all;
+  const registered = all.filter(r=>r.linked_client).length;
+  const rows = refs.map(r=>`<tr onclick="admOpenReferral(${r.id})" title="Open ${esc(r.name)}">
+    <td><span class="badge b-purp">${esc(r.ref_code||"—")}</span></td>
+    <td><b>${esc(r.name)}</b>${r.designation?`<br><small style="color:var(--muted)">${esc(r.designation)}</small>`:""}</td>
+    <td>${referralStatusHtml(r)}</td>
+    <td>${esc(r.added_by||"—")}</td>
     <td>${fmtDate(r.created_at)}</td>
-    <td onclick="event.stopPropagation()">
-      <div class="adm-row-menu">
-        <button class="adm-dots" onclick="admToggleRowMenu(event,'ref-${r.id}')">&#8942;</button>
-        <div class="adm-row-menu-pop" id="qmenu-ref-${r.id}">
-          <button class="danger" onclick="admToggleRowMenu(event,'ref-${r.id}');admDeleteReferral(${r.id})">Delete</button>
-        </div>
-      </div>
-    </td>
+    <td style="text-align:right;color:var(--muted)">Open &#8250;</td>
   </tr>`).join("");
+  const addBtns = canAddReferral()
+    ? `<div style="display:flex;gap:8px"><button class="btn ghost small" onclick="admOpenBulkImport('referrals',${jsq(c.id)})">Import</button><button class="btn small" onclick="admOpenAddReferral(${jsq(c.id)})">+ Add referral</button></div>`
+    : `<span style="font-size:12px;color:var(--muted)">View only</span>`;
   return `<div class="adm-panel">
     <div class="adm-panel-head">
-      <h3>Client's Contact</h3>
+      <h3>Referrals <span class="badge b-purp" style="margin-left:6px">${all.length}</span></h3>
       <div class="adm-search"><span>&#128269;</span><input id="universalSearchInput" placeholder="Search" value="${esc(searchQuery)}" oninput="handleSearchInput(this.value)"></div>
-      <div style="display:flex;gap:8px"><button class="btn ghost small" onclick="admOpenBulkImport('referrals',${jsq(c.id)})">Import</button><button class="btn small" onclick="admOpenAddReferral(${jsq(c.id)})">+ Add contact</button></div>
+      ${addBtns}
+    </div>
+    <div style="padding:8px 18px;font-size:12.5px;color:var(--muted);border-bottom:1px solid var(--line)">
+      ${esc(c.name)} (${esc(clientFamilyId(c))}) referred <b style="color:var(--text)">${all.length}</b>
+      ${all.length===1?"person":"people"}${all.length?` &bull; <b style="color:var(--text)">${registered}</b> registered as clients`:""}.
+      Click a name to see their projects.
     </div>
     <div class="adm-table-wrap">
       ${refs.length ? `<table class="adm-table"><thead><tr>
-        <th>Designation</th><th>Name</th><th>Email</th><th>Mobile</th><th>Created On</th><th>Action</th>
-      </tr></thead><tbody>${rows}</tbody></table>` : `<div class="adm-empty">No referral contacts recorded yet.</div>`}
+        <th>Referral ID</th><th>Name</th><th>Client</th><th>Added by</th><th>Added on</th><th></th>
+      </tr></thead><tbody>${rows}</tbody></table>` : `<div class="adm-empty">${all.length ? "No referral matches your search." : "No referrals recorded yet."}</div>`}
     </div>
   </div>`;
 }
-function admOpenAddReferral(clientId){
-  openModal(`<h3>Add referral contact</h3>
-    <div class="grid2">
-      <div class="field"><label>Name *</label><input id="ref_name"></div>
-      <div class="field"><label>Designation</label><input id="ref_designation" placeholder="e.g. Asst. Prof."></div>
-    </div>
-    <div class="grid2">
-      <div class="field"><label>Email</label><input id="ref_email" type="email"></div>
-      <div class="field"><label>Mobile</label><input id="ref_mobile" type="tel" inputmode="numeric" maxlength="10" onkeydown="blockNonDigitKey(event)" oninput="digitsOnlyInput(this,10)"></div>
-    </div>
-    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn" onclick="admSaveReferral(${jsq(clientId)})">Add contact</button></div>`);
+// The window that opens when a referral name is clicked: their projects (same table as the
+// profile's Projects tab), or - if they haven't registered yet - register / link options.
+function admOpenReferral(id){
+  const r = clientReferrals.find(x=>x.id===id);
+  if(!r) return;
+  const referrer = findClient(r.client_id);
+  const canEdit = canAddReferral(), canDel = canDeleteReferral();
+  const modern = isModernRole();
+  const openWork = x=> modern ? `closeModal();admOpenProject(${jsq(x.id)})` : `closeModal();openDrawer(${jsq(x.id)})`;
+  let body;
+  if(r.linked_client){
+    const t = familyProjectRowsHtml(r.linked_client, openWork);
+    const first = referralLinkedWorks(r)[0];
+    body = t.count ? `<div class="adm-panel" style="margin:12px 0 0">
+        <div class="adm-panel-head"><h3>Projects</h3><span class="badge b-purp">${t.count}</span></div>
+        <div class="adm-table-wrap"><table class="adm-table">${FAMILY_PROJECTS_HEAD}<tbody>${t.rows}</tbody></table></div>
+      </div>
+      ${first ? `<div style="margin-top:10px"><button class="btn ghost small" onclick="${modern?`closeModal();admOpenClientProfile(${jsq(first.id)})`:`closeModal();openDrawer(${jsq(first.id)})`}">Open client profile &#8594;</button></div>` : ""}`
+      : `<p style="font-size:13px;color:var(--muted);margin-top:12px">Registered as <b>${esc(r.linked_client)}</b> — their projects aren't on your dashboard yet.</p>`;
+    if(canEdit) body += `<p style="font-size:12px;color:var(--muted);margin-top:10px">Wrong person?
+      <a href="#" onclick="event.preventDefault();admLinkReferral(${r.id},'')">Unlink</a></p>`;
+  } else {
+    body = `<div class="sec" style="margin-top:12px">
+      <p style="font-size:13px;margin:0 0 6px"><b>Not registered as a client yet.</b></p>
+      <p style="font-size:12.5px;color:var(--muted);margin:0">When they register, put <b>${esc(r.ref_code)}</b> in "Referred by" and they are linked automatically.</p>
+      ${canEdit ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <button class="btn small" onclick="admRegisterReferral(${r.id})">+ Register as new client</button>
+        </div>
+        <div class="field" style="margin:14px 0 0"><label>Already a client? Link by Client ID or phone</label>
+          <div style="display:flex;gap:8px"><input id="ref_link_input" placeholder="e.g. CL-1255 or 9876543210"
+            onkeydown="if(event.key==='Enter') admLinkReferral(${r.id}, this.value)">
+          <button class="btn ghost small" onclick="admLinkReferral(${r.id}, $('ref_link_input').value)">Link</button></div></div>` : ""}
+    </div>`;
+  }
+  openModal(`<h3>${esc(r.name)} <span class="badge b-purp" style="margin-left:6px;vertical-align:middle">${esc(r.ref_code||"")}</span></h3>
+    <p class="msub">Referred by ${esc(referrer?referrer.name:"")} (${esc(referrer?clientFamilyId(referrer):r.client_id)})
+      ${r.designation?` &bull; ${esc(r.designation)}`:""} &bull; added ${fmtDate(r.created_at)}${r.added_by?` by ${esc(r.added_by)}`:""}</p>
+    ${body}
+    <div class="modal-actions">
+      ${canDel ? `<button class="btn ghost" style="color:var(--bad);margin-right:auto" onclick="closeModal();admDeleteReferral(${r.id}, ${(!modern && referrer) ? jsq(referrer.id) : "null"})">Remove referral</button>` : ""}
+      <button class="btn ghost" onclick="closeModal()">Close</button></div>`, {wide: !!r.linked_client});
 }
-async function admSaveReferral(clientId){
-  const name = $("ref_name").value.trim();
-  if(!name){ toast("Enter a name"); return; }
+async function admLinkReferral(id, clientRef){
+  const r = clientReferrals.find(x=>x.id===id); if(!r) return;
+  clientRef = (clientRef||"").trim();
+  if(clientRef==="" && !confirm(`Unlink ${r.name} (${r.ref_code}) from ${r.linked_client}?`)) return;
   try{
-    await api("add_client_referral", {clientId, name, designation:$("ref_designation").value.trim(),
-      email:$("ref_email").value.trim(), mobile:$("ref_mobile").value.trim()});
-    closeModal(); await loadData(); rerenderCurrent(); toast("Contact added");
-  }catch(e){ toast(e.message || "Could not add contact"); }
+    const out = await api("link_client_referral", {id, clientId: r.client_id, clientRef});
+    await loadData(); rerenderCurrent();
+    toast(out.linkedClient ? `${r.ref_code} linked to ${out.linkedClient}` : "Unlinked");
+    admOpenReferral(id);
+  }catch(e){ toast(e.message || "Could not link"); }
 }
-async function admDeleteReferral(id){
-  try{ await api("delete_client_referral", {id}); await loadData(); rerenderCurrent(); toast("Contact removed"); }
-  catch(e){ toast(e.message || "Could not remove contact"); }
+// Opens Add Client with the name filled in and "Referred by" = the referral ID, so the
+// new client is linked to this referral automatically when saved.
+function admRegisterReferral(id){
+  const r = clientReferrals.find(x=>x.id===id); if(!r) return;
+  closeModal();
+  if(!canAddClient()){ toast("Only BDC / Marketing can register a new client"); return; }
+  openAddClient();
+  setTimeout(()=>{
+    if($("f_name")) $("f_name").value = r.name;
+    if($("f_referredBy")) $("f_referredBy").value = r.ref_code;
+    if($("f_designation") && r.designation) $("f_designation").value = r.designation;
+  }, 30);
+}
+function admOpenAddReferral(clientId){
+  if(!canAddReferral()){ toast("Only BDC, Marketing TL, Marketing Manager or Admin can add referrals"); return; }
+  const c = findClient(clientId);
+  const fam = clientFamilyId(c);
+  const nextNo = (c ? familyReferrals(c).reduce((m,r)=>Math.max(m, referralNo(r)===9999?0:referralNo(r)), 0) : 0) + 1;
+  openModal(`<h3>Add referral</h3>
+    <p class="msub">Referred by ${esc(c?c.name:"")} (${esc(fam)}) &bull; will get the ID <b>${esc(fam)}-RF${nextNo}</b></p>
+    <div class="field"><label>Name *</label><input id="ref_name" maxlength="200" placeholder="Name of the person referred"
+      onkeydown="if(event.key==='Enter') admSaveReferral(${jsq(clientId)})"></div>
+    <div class="field"><label>Designation (optional)</label><input id="ref_designation" maxlength="120" placeholder="e.g. Asst. Prof."></div>
+    <p style="font-size:12px;color:var(--muted);margin-top:4px">Email and phone number are not needed.</p>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn" id="ref_save_btn" onclick="admSaveReferral(${jsq(clientId)})">Add referral</button></div>`);
+  setTimeout(()=>{ const el = $("ref_name"); if(el) el.focus(); }, 50);
+}
+let refSaving = false;
+async function admSaveReferral(clientId){
+  if(refSaving) return;
+  const name = $("ref_name").value.trim();
+  if(!name){ toast("Enter the name"); $("ref_name").focus(); return; }
+  refSaving = true;
+  const btn = $("ref_save_btn"); if(btn) btn.disabled = true;
+  try{
+    const out = await api("add_client_referral", {clientId, name, designation:$("ref_designation").value.trim()});
+    closeModal(); await loadData(); rerenderCurrent();
+    if($("drawer") && $("drawer").classList.contains("open")) openDrawer(clientId);
+    toast(`Referral added — ${out.refCode||""}`);
+  }catch(e){ toast(e.message || "Could not add the referral"); if(btn) btn.disabled = false; }
+  refSaving = false;
+}
+async function admDeleteReferral(id, reopenClientId){
+  const r = clientReferrals.find(x=>x.id===id);
+  if(!confirm(`Remove referral ${r ? (r.ref_code + " — " + r.name) : ""}?\n\nIts ID will not be given to anyone else.`)) return;
+  try{
+    await api("delete_client_referral", {id}); await loadData(); rerenderCurrent();
+    if(reopenClientId) openDrawer(reopenClientId);
+    toast("Referral removed");
+  }catch(e){ toast(e.message || "Could not remove the referral"); }
+}
+// Client drawer (BDC / Marketing TL / Manager / Admin dashboards): same list, same IDs.
+function drawerReferralsHtml(c){
+  const refs = familyReferrals(c);
+  const canAdd = canAddReferral(), canDel = canDeleteReferral();
+  if(!refs.length && !canAdd) return "";
+  return `<div class="sec">
+    <h4>Referrals (${refs.length}) ${canAdd?`<button class="btn ghost small" style="float:right" onclick="admOpenAddReferral(${jsq(c.id)})">+ Add referral</button>`:""}</h4>
+    ${refs.length ? refs.map(r=>`<div class="hist-item" style="display:flex;justify-content:space-between;align-items:center;gap:10px;cursor:pointer" onclick="admOpenReferral(${r.id})" title="Open">
+        <span><span class="badge b-purp">${esc(r.ref_code||"—")}</span> <b style="margin-left:6px">${esc(r.name)}</b>
+          <br><small style="color:var(--muted)">${r.linked_client ? `Client ${esc(r.linked_client)} &bull; ${referralLinkedWorks(r).length} project(s)` : "Not registered yet"}</small></span>
+        <span style="color:var(--muted)">&#8250;</span>
+      </div>`).join("") : `<p style="color:var(--muted);font-size:13px">No referrals yet.</p>`}
+  </div>`;
 }
 function admFmtFileSize(){ return ""; }
 function admProfileDocumentsTab(c){
@@ -11675,6 +11814,7 @@ function openDrawer(id){
     </div>` : ""}
     ${seeMoney ? `<div class="sec" style="margin-top:14px"><h4>Payments</h4>${payHtml}</div>` : ""}
     ${seeMoney ? installmentHtml : ""}
+    ${drawerReferralsHtml(c)}
     <div class="sec"><h4>Conversations ${isTelecaller()?`<button class="btn ghost small" style="float:right" onclick="openCallModal(${jsq(c.id)})">+ Log call</button>`:""}</h4>${callsHtml}</div>
     ${(c.journalName || (c.journalTargets&&c.journalTargets.length)) ? `<div class="sec">
       <h4>Target journal(s)</h4>
@@ -12171,7 +12311,15 @@ async function addJournalEmployee(teamType){
 }
 
 /* ================= MODALS ================= */
-function openModal(html){ stopChatPolling(); $("modalBox").innerHTML = html; $("modalBg").classList.add("open"); }
+function openModal(html, opts){
+  stopChatPolling();
+  const box = $("modalBox");
+  box.innerHTML = html;
+  // optional wider window (e.g. the Referrals window shows a full projects table)
+  box.style.maxWidth = (opts && opts.wide) ? "min(900px, 96vw)" : "";
+  box.style.width = (opts && opts.wide) ? "min(900px, 96vw)" : "";
+  $("modalBg").classList.add("open");
+}
 function closeModal(){ stopChatPolling(); $("modalBg").classList.remove("open"); }
 // Detects whether the open modal has any form data the person has typed in, so an
 // accidental click on the dark overlay (or an Escape press) doesn't silently throw
