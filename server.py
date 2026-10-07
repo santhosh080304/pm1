@@ -1641,8 +1641,10 @@ def next_referral_code(con, client_id):
     fam = _referral_family_id(con, client_id)
     prefix = f"{fam}-RF"
     n = 0
-    for r in con.execute("SELECT ref_code FROM client_referrals WHERE ref_code LIKE ?", (prefix + "%",)):
-        m = re.match(r"^" + re.escape(prefix) + r"(\d+)$", r["ref_code"] or "")
+    pat = re.compile(r"^" + re.escape(prefix) + r"(\d+)(?:-S\d+)?$")
+    for r in con.execute("SELECT ref_code AS v FROM client_referrals WHERE ref_code LIKE ? "
+                         "UNION ALL SELECT id AS v FROM clients WHERE id LIKE ?", (prefix + "%", prefix + "%")):
+        m = pat.match(r["v"] or "")
         if m:
             n = max(n, int(m.group(1)))
     return f"{prefix}{n + 1}"
@@ -6926,9 +6928,42 @@ def _handle_action_core(action, d, ip=""):
             name = (d.get("name") or "").strip()
             phone = (d.get("phone") or "").strip()
             deadline = d.get("deadlineDate") or ""
-            if not name or not phone:
+            # REFERRAL CLIENT: added from a client's Referrals tab. Same form and same
+            # rules as any client, except phone / email are optional and the Client ID is
+            # the referrer's ID + "-RF<n>" (CL-1027-RF1) instead of a new CL-number.
+            #   referrerClientId = the client who referred them (any of their works)
+            #   referralId       = an existing name-only referral being registered
+            referral_row = None
+            referrer_id = (d.get("referrerClientId") or "").strip()
+            if d.get("referralId"):
+                referral_row = con.execute("SELECT * FROM client_referrals WHERE id=?",
+                                           (d.get("referralId"),)).fetchone()
+                if not referral_row:
+                    raise ApiError("That referral no longer exists.")
+                if referral_row["linked_client"]:
+                    raise ApiError(f"{referral_row['ref_code']} is already registered as client "
+                                   f"{referral_row['linked_client']}.")
+                referrer_id = referral_row["client_id"]
+            is_referral = bool(referrer_id)
+            referrer = get_client(con, referrer_id) if is_referral else None
+            if is_referral and (d.get("empRole") or "") == "TELECALLER" and \
+                    not bdc_owns_client(con, d.get("empName"), referrer["id"]):
+                raise ApiError("You can only add referrals for your own leads.", 403)
+            # "Another work for an existing client" picked with the look-up box: the family
+            # is given directly, so a client without phone / email (a referral) can still
+            # get a 2nd / 3rd work under the same Client ID.
+            family_of = None
+            if d.get("familyOf") and not is_referral:
+                family_of = con.execute("SELECT * FROM clients WHERE id=? OR display_id=? ORDER BY created_at ASC, id ASC",
+                                        (d.get("familyOf").strip(), d.get("familyOf").strip())).fetchone()
+                if not family_of:
+                    raise ApiError("The client you looked up was not found - look them up again.")
+            phone_optional = is_referral or bool(family_of and "-RF" in (family_of["display_id"] or family_of["id"]))
+            if not name:
+                raise ApiError("Client name is required.")
+            if not phone and not phone_optional:
                 raise ApiError("Client name and phone are required.")
-            if not re.match(r"^\d{10}$", phone):
+            if phone and not re.match(r"^\d{10}$", phone):
                 raise ApiError("Enter a valid 10-digit phone number.")
             email_check = (d.get("email") or "").strip()
             if email_check and not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email_check):
@@ -6958,7 +6993,7 @@ def _handle_action_core(action, d, ip=""):
 
             display_id = None
             norm_phone = phone.replace(" ", "").lower()
-            existing_family = con.execute(
+            existing_family = [] if family_of else con.execute(
                 """SELECT * FROM clients
                    WHERE (phone<>'' AND LOWER(REPLACE(phone,' ',''))=?)
                       OR (email<>'' AND ?<>'' AND LOWER(email)=LOWER(?))
@@ -6971,6 +7006,12 @@ def _handle_action_core(action, d, ip=""):
                 # it. No blocking here, even if it's the exact same service again; the
                 # "Work X of Y" badge (serviceFamilyInfo in index.html) numbers them.
                 display_id = existing_family[0]["display_id"] or existing_family[0]["id"]
+            if family_of:
+                display_id = family_of["display_id"] or family_of["id"]
+            if is_referral and display_id:
+                m = existing_family[0]
+                raise ApiError(f"This phone / email already belongs to {m['name']} ({display_id}). A referral is a new "
+                               "person - open the referral and use \"Link to existing client\" instead.")
 
             n = 1001
             for r in con.execute("SELECT id FROM clients"):
@@ -6978,10 +7019,19 @@ def _handle_action_core(action, d, ip=""):
                 if m:
                     n = max(n, int(m.group(1)) + 1)
 
-            if display_id:
+            ref_code = ""
+            if is_referral:
+                ref_code = referral_row["ref_code"] if referral_row else next_referral_code(con, referrer["id"])
+                if con.execute("SELECT 1 FROM clients WHERE id=? OR display_id=?", (ref_code, ref_code)).fetchone():
+                    ref_code = next_referral_code(con, referrer["id"])
+                cid = display_id = ref_code
+            elif display_id:
                 siblings = con.execute(
                     "SELECT COUNT(*) c FROM clients WHERE display_id=?", (display_id,)).fetchone()["c"]
                 cid = f"{display_id}-S{siblings + 1}"
+                while con.execute("SELECT 1 FROM clients WHERE id=?", (cid,)).fetchone():
+                    siblings += 1
+                    cid = f"{display_id}-S{siblings + 1}"
             else:
                 cid = f"CL-{n}"
                 display_id = cid
@@ -7035,12 +7085,30 @@ def _handle_action_core(action, d, ip=""):
 
             actor = (d.get("actorLabel") or "").strip() or "Telecaller"
             con.execute("INSERT INTO history (client_id, stage, actor) VALUES (?,'NEW',?)", (cid, actor))
-            link_referral_from_referred_by(con, (d.get("referredBy") or "").strip(), cid)
+            if is_referral:
+                ref_fam = referrer["display_id"] or referrer["id"]
+                if not (d.get("referredBy") or "").strip():
+                    con.execute("UPDATE clients SET referred_by=? WHERE id=?",
+                                (f"{ref_fam} ({referrer['name']})", cid))
+                if referral_row:
+                    con.execute("""UPDATE client_referrals SET linked_client=?, name=?,
+                                   email=CASE WHEN COALESCE(email,'')='' THEN ? ELSE email END,
+                                   mobile=CASE WHEN COALESCE(mobile,'')='' THEN ? ELSE mobile END
+                                   WHERE id=?""", (cid, name, email, phone, referral_row["id"]))
+                else:
+                    con.execute("""INSERT INTO client_referrals
+                                   (client_id, designation, name, email, mobile, ref_code, added_by, linked_client)
+                                   VALUES (?,?,?,?,?,?,?,?)""",
+                                (referrer["id"], (d.get("designation") or "").strip()[:120], name, email, phone,
+                                 cid, _referral_actor(d), cid))
+            else:
+                link_referral_from_referred_by(con, (d.get("referredBy") or "").strip(), cid)
             # Start the stage-reminder clock: the Telecaller now has one step-time
             # to send this lead to the Marketing TL.
             con.execute("UPDATE clients SET stage_entered_at=? WHERE id=?", (now_str(), cid))
             con.commit()
-            return {"ok": True, "id": cid, "displayId": display_id, "projectId": project_id}
+            return {"ok": True, "id": cid, "displayId": display_id, "projectId": project_id,
+                    "refCode": ref_code}
 
         if action == "add_call":
             c = get_client(con, d.get("clientId") or "")

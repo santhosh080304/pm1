@@ -111,3 +111,25 @@ REFERRALS - OPEN A REFERRED PERSON'S PROJECTS
   * BDC / Marketing TL: same window from the Referrals section of the client drawer.
   Database: client_referrals gets 1 more column (linked_client) - added automatically.
   FILES CHANGED: server.py, index.html
+
+
+REFERRAL = A FULL CLIENT  (+ Add referral opens the normal Add Client form)
+==========================================================================
+  * "+ Add referral" (Referrals tab, or the client drawer for BDC / Marketing TL) now opens
+    the SAME Add Client form - phone, email, service, total amount, registration amount +
+    proof, split-up, deadline, topic, BDC ... everything is the same, with only these changes:
+      - Phone and Email are OPTIONAL.
+      - The Client ID is the referrer's ID + "-RF<n>":  D Gowthami CL-1027 refers 3 people ->
+        CL-1027-RF1, CL-1027-RF2, CL-1027-RF3 (shown at the top of the form before saving).
+      - "Referred by" is filled in for you, e.g. "CL-1027 (D Gowthami)".
+    The new client then goes through the pipeline exactly like any client (Telecaller ->
+    TL -> Manager -> Accounts -> Technical ...), shows in Clients / Projects, etc.
+  * Second / third work of a referral client: Add Client -> look up "CL-1027-RF1" ->
+    saved as CL-1027-RF1-S2, -S3 (works even when the referral client has no phone/email -
+    the look-up box now passes the Client ID to the server, not just the phone).
+  * If the phone / email typed already belongs to a client, the form warns and the server
+    refuses: a referral is a new person - use "Link to existing client" on the referral.
+  * Old name-only referrals: open one -> "+ Register as new client" -> same form, name already
+    filled, and the client takes that referral's existing ID (e.g. CL-1001-RF4).
+  * Who: BDC (own leads), Marketing TL, Marketing Manager, MD / Admin, Super Admin.
+  FILES CHANGED: server.py, index.html
