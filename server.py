@@ -1,5 +1,6 @@
 import base64
 import csv
+import gzip
 import hashlib
 import hmac
 import io
@@ -11,6 +12,7 @@ import re
 import secrets
 import smtplib
 import socket
+import ssl
 import struct
 import sys
 import threading
@@ -82,12 +84,16 @@ IS_PRODUCTION = APP_ENV in ("production", "prod")
 DEBUG = _env_bool("DEBUG", False) and not IS_PRODUCTION   # never enable in production
 PORT = int(_env("PORT", "8000"))
 HOST = _env("HOST", "0.0.0.0")
-COOKIE_SECURE = _env_bool("COOKIE_SECURE", IS_PRODUCTION)
-FORCE_HTTPS = _env_bool("FORCE_HTTPS", IS_PRODUCTION)
+_LOCAL_TLS = bool(_env("TLS_CERT_FILE", "").strip() and _env("TLS_KEY_FILE", "").strip())
+COOKIE_SECURE = _env_bool("COOKIE_SECURE", IS_PRODUCTION or _LOCAL_TLS)
+FORCE_HTTPS = _env_bool("FORCE_HTTPS", IS_PRODUCTION or _LOCAL_TLS)
 TRUST_PROXY = _env_bool("TRUST_PROXY", IS_PRODUCTION)
 SESSION_TTL_HOURS = float(_env("SESSION_TTL_HOURS", "12"))
 SESSION_MAX_HOURS = float(_env("SESSION_MAX_HOURS", "168"))
-MIN_PASSWORD_LENGTH = max(8, int(_env("MIN_PASSWORD_LENGTH", "8")))
+# "Log in as <employee>" sessions are for a quick look / quick fix, not a second login:
+# they end this many minutes after they were opened, however active they are.
+IMPERSONATION_MAX_MINUTES = max(5, int(_env("IMPERSONATION_MAX_MINUTES", "60")))
+MIN_PASSWORD_LENGTH = max(10, int(_env("MIN_PASSWORD_LENGTH", "10")))
 MAX_UPLOAD_BYTES = int(_env("MAX_UPLOAD_BYTES", str(6 * 1024 * 1024)))
 MAX_ATTACHMENT_BYTES = int(_env("MAX_ATTACHMENT_BYTES", str(5 * 1024 * 1024)))
 MAX_BODY_BYTES = int(_env("MAX_BODY_BYTES", str(12 * 1024 * 1024)))
@@ -95,6 +101,23 @@ MAX_PASSWORD_LENGTH = 200
 APP_BASE_URL = _env("APP_BASE_URL", "").strip().rstrip("/")
 INITIAL_ADMIN_PASSWORD = _env("INITIAL_ADMIN_PASSWORD", "").strip()
 ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in _env("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+
+# ----- rate limits (review fix #10). A whole office usually reaches the app from ONE
+#       public IP, so per-IP limits must leave room for everyone there; individual
+#       accounts get their own, much tighter, failed-login limit. -----
+LOGIN_RATE_PER_IP = max(5, int(_env("LOGIN_RATE_PER_IP", "60")))              # sign-in attempts / 5 min / IP
+LOGIN_FAILS_PER_ACCOUNT = max(3, int(_env("LOGIN_FAILS_PER_ACCOUNT", "8")))    # wrong passwords / 15 min / account
+API_RATE_PER_TAB = max(60, int(_env("API_RATE_PER_TAB", "240")))               # calls / min / signed-in tab
+API_RATE_PER_IP = max(180, int(_env("API_RATE_PER_IP", "2400")))              # calls / min / IP (whole office)
+
+# ----- two-step sign-in (authenticator-app codes) for Admin and department logins -----
+#   REQUIRE_2FA = "admins" (default): Super Admin and MD Admin must use it; other
+#                 department logins may turn it on in Settings.
+#               = "all": every department login must use it.   = "off": optional for all.
+#   RESET_2FA_ROLE = comma-separated roles whose two-step sign-in is cleared at start-up
+#                 (recovery when the phone with the codes is lost; remove it afterwards).
+REQUIRE_2FA = _env("REQUIRE_2FA", "admins").strip().lower()
+RESET_2FA_ROLE = [r.strip() for r in _env("RESET_2FA_ROLE", "").split(",") if r.strip()]
 
 # ----- login CAPTCHA (required on every sign-in, for every dashboard) -----
 # Number of characters in each captcha (4-8) and how long one stays valid.
@@ -166,6 +189,40 @@ def is_hashed_password(value):
     return isinstance(value, str) and value.startswith(_PBKDF2_PREFIX + "$")
 
 
+# Passwords people pick most often (and this app's own names). New passwords are checked
+# against these as well as for length (review: A-grade hardening). Existing passwords keep
+# working; the rule applies when a password is set or changed.
+_COMMON_PASSWORDS = frozenset("""
+password password1 password123 passw0rd 12345678 123456789 1234567890 0123456789 11111111
+00000000 12341234 87654321 qwerty123 qwertyuiop asdfghjkl iloveyou welcome123 welcome@123
+admin123 admin@123 administrator letmein123 abc12345 abcd1234 abcd@1234 india123 india@123
+changeme123 superadmin super@123 imatiz imatiz123 imatiz@123 matiz123 matiz@123 test1234
+test@1234 pass@1234 pass@123 password@1 password@123 p@ssw0rd p@ssword1 1q2w3e4r5t q1w2e3r4t5
+""".split())
+
+
+def require_strong_password(pw):
+    pw = pw or ""
+    if len(pw) < MIN_PASSWORD_LENGTH:
+        raise ApiError("Choose a password at least %d characters long." % MIN_PASSWORD_LENGTH)
+    if len(pw) > MAX_PASSWORD_LENGTH:
+        raise ApiError("That password is too long.")
+    low = pw.lower()
+    if low in _COMMON_PASSWORDS or len(set(low)) <= 2 or low.isdigit() and len(set(low)) <= 4:
+        raise ApiError("That password is too easy to guess. Use a longer mix of words, numbers or symbols.")
+
+
+_DUMMY_HASH = []
+
+
+def _dummy_password_hash():
+    """A real hash to check against when the account doesn't exist, so a failed sign-in
+    takes the same time whether or not the ID is real."""
+    if not _DUMMY_HASH:
+        _DUMMY_HASH.append(hash_password(secrets.token_hex(16)))
+    return _DUMMY_HASH[0]
+
+
 def verify_password(raw_password, stored):
     """Constant-time verification. Returns False for any malformed/missing hash."""
     if not stored or not is_hashed_password(stored):
@@ -200,6 +257,24 @@ def normalize_branch_name(raw):
     if key in _BRANCH_ALIASES:
         return _BRANCH_ALIASES[key]
     return re.sub(r"\s+", " ", v).title()
+
+
+# SECURITY (stored XSS, defense in depth): a team member's name is shown on every
+# dashboard and is used inside inline click handlers. index.html escapes it with
+# jsq()/esc(), but names are also typed by managers and bulk-imported, so markup
+# characters and control characters are refused at the source as well.
+# Apostrophes, dots, hyphens etc. stay allowed (O'Brien, K. Ravi, Anne-Marie).
+_UNSAFE_NAME_RE = re.compile(r"[<>`\x00-\x1f\x7f]")
+MAX_PERSON_NAME_LENGTH = 100
+
+
+def person_name_problem(name):
+    """'' if the name is acceptable, otherwise a short reason to show the user."""
+    if len(name or "") > MAX_PERSON_NAME_LENGTH:
+        return "Name is too long (max %d characters)." % MAX_PERSON_NAME_LENGTH
+    if _UNSAFE_NAME_RE.search(name or ""):
+        return "Name can't contain < > ` or control characters."
+    return ""
 
 
 # SECURITY: file-upload hygiene. Files are stored as base64 blobs in SQLite (never written
@@ -323,6 +398,22 @@ def _rate_limited(ip, bucket, limit, window_seconds):
             for k in [k for k, v in _RATE_BUCKETS.items() if not v or now - max(v) > 3600]:
                 _RATE_BUCKETS.pop(k, None)
         return False
+
+
+def _rate_peek(key, bucket, limit, window_seconds):
+    """True when `key` already has `limit` hits in the window (records nothing)."""
+    now = time.time()
+    with _RATE_LOCK:
+        return len([t for t in _RATE_BUCKETS.get((key, bucket), []) if now - t < window_seconds]) >= limit
+
+
+def _rate_hit(key, bucket, window_seconds):
+    """Record one hit for `key` (used for failed sign-ins, counted per account)."""
+    now = time.time()
+    with _RATE_LOCK:
+        hits = [t for t in _RATE_BUCKETS.get((key, bucket), []) if now - t < window_seconds]
+        hits.append(now)
+        _RATE_BUCKETS[(key, bucket)] = hits
 
 
 # =====================================================================
@@ -630,8 +721,21 @@ def verify_login_captcha(captcha_id, answer):
 # the one stored server-side, so these checks act on a trusted identity.
 # =====================================================================
 
+# SECURITY: a manager signed in as a team member ("Log in as") must not be able to
+# take the account over. Changing the password, the profile (which holds the Mail ID
+# that "Forgot password" sends reset codes to) or the e-mail would turn a 60-minute
+# look into permanent access, so those stay with the employee themselves.
+IMPERSONATION_BLOCKED_ACTIONS = frozenset({"change_password", "save_my_profile", "save_my_email"})
+# Background polling / pure page loads that happen every few seconds; everything else
+# done in a "Log in as" session is written to the login_as_log table.
+IMPERSONATION_UNLOGGED_ACTIONS = frozenset({
+    "bootstrap", "session", "chat_typing", "dm_typing", "dm_inbox", "stage_reminders_poll",
+    "ai_reminders_poll", "ai_reminder_list", "call_poll", "alert_tone_get", "get_my_profile",
+    "dm_directory", "validation_list",
+})
+
 # Reachable with no session at all.
-PUBLIC_ACTIONS = {"login", "login_captcha", "logout", "session",
+PUBLIC_ACTIONS = {"login", "login_otp", "login_captcha", "logout", "session", "redeem_employee_login",
                   "set_client_password", "request_client_password_reset",
                   "request_employee_password_reset", "employee_reset_with_code"}
 
@@ -673,6 +777,10 @@ _R_ALL_STAFF = ("employee", "telecaller", "marketing_tl", "marketing_manager",
                 "content_coordinator", "journal_manager", "journal_tl") + _R_ADMIN
 
 ACTION_ROLES = {
+    # "Log in as this employee" - one-click sign-in to a team member's dashboard.
+    # Super Admin / MD Admin: any employee. Each team's manager: only their own team
+    # (checked again in the handler against EMPLOYEE_LOGIN_AS_TEAMS).
+    "create_employee_login_link": ("technical_manager", "journal_manager", "marketing_manager"),
     # ---- shared, any authenticated staff member ----
     "bootstrap": _R_ALL_STAFF,
     "change_password": _R_ALL_STAFF,
@@ -784,13 +892,13 @@ ACTION_ROLES = {
     "assign_proofreaders": _R_TECH + ("journal_manager", "journal_tl", "employee"),
     "assign_format_coordinator": _R_TECH_MGMT + ("journal_manager", "journal_tl"),
     "assign_proofread_coordinator": _R_TECH_MGMT + ("journal_manager", "journal_tl"),
-    "coordinator_take_proposal": _R_ALL_STAFF,
-    "coordinator_take_implementation": _R_ALL_STAFF,
-    "coordinator_take_writing": _R_ALL_STAFF,
-    "coordinator_assign_proposal_writer": _R_ALL_STAFF,
-    "coordinator_assign_implementation_team": _R_ALL_STAFF,
-    "coordinator_assign_writing_team": _R_ALL_STAFF,
-    "coordinator_decision": _R_ALL_STAFF,
+    "coordinator_take_proposal": ("employee",) + _R_TECH,
+    "coordinator_take_implementation": ("employee",) + _R_TECH,
+    "coordinator_take_writing": ("employee",) + _R_TECH,
+    "coordinator_assign_proposal_writer": ("employee",) + _R_TECH,
+    "coordinator_assign_implementation_team": ("employee",) + _R_TECH,
+    "coordinator_assign_writing_team": ("employee",) + _R_TECH,
+    "coordinator_decision": ("employee",) + _R_TECH,
     "techtl_decision": _R_TECH_MGMT,
     "techmgr_decision": _R_TECH_MGR,
     # BUGFIX: this is the MARKETING TL's "Verify & send to Manager" step (TL_REVIEW ->
@@ -800,22 +908,22 @@ ACTION_ROLES = {
     "verify_proposal": _R_TECH_MGMT,
     "reassign_work": _R_TECH_MGMT,
     "task_mgmt_decision": _R_TECH_MGMT,
-    "submit_proposal": _R_ALL_STAFF,
+    "submit_proposal": ("employee",) + _R_TECH,
     "deliver_proposal": _R_TECH_MGMT,
     "complete_implementation": _R_TECH_MGMT,
     "start_work_submission": _R_ALL_STAFF,
     "send_implementation_to_client": _R_TECH_MGMT,
     "approve_demo": _R_TECH_MGMT,
-    "submit_writing_demo": _R_ALL_STAFF,
-    "mark_writing_completed": _R_ALL_STAFF,
+    "submit_writing_demo": ("employee",) + _R_TECH,
+    "mark_writing_completed": ("employee",) + _R_TECH,
     "mark_writing_demo_given": _R_TECH_MGMT + ("marketing_manager", "marketing_tl", "employee"),
-    "writer_resubmit": _R_ALL_STAFF,
-    "writer_resubmit_proofread": _R_ALL_STAFF,
-    "complete_formatting": _R_ALL_STAFF,
-    "format_decision": _R_ALL_STAFF,
+    "writer_resubmit": ("employee",) + _R_TECH,
+    "writer_resubmit_proofread": ("employee",) + _R_TECH,
+    "complete_formatting": ("employee",) + _R_JOURNAL,
+    "format_decision": ("employee",) + _R_JOURNAL,
     "format_manager_decision": _R_TECH_MGMT + ("journal_manager", "journal_tl"),
-    "proofread_decision": _R_ALL_STAFF,
-    "proofread_request_correction": _R_ALL_STAFF,
+    "proofread_decision": ("employee",) + _R_JOURNAL,
+    "proofread_request_correction": ("employee",) + _R_JOURNAL,
     # ---- stage reminders: anyone signed in polls/cancels their OWN pop-ups
     #      (the handler only ever returns items that person must act on);
     #      only Admin changes the timing or sees everyone's overdue list. ----
@@ -868,6 +976,12 @@ ACTION_ROLES = {
     # ---- admin only ----
     "admin_directory": _R_STAFF_MGMT,
     "admin_change_password": _R_ADMIN,
+    # Two-step sign-in: each department login manages its own; Admin can reset one.
+    "otp_status": _R_ALL_STAFF,
+    "otp_setup_start": _R_ALL_STAFF,
+    "otp_setup_confirm": _R_ALL_STAFF,
+    "otp_disable": _R_ALL_STAFF,
+    "admin_reset_otp": _R_ADMIN,
     "set_role_access": _R_ADMIN,
     "delete_client": _R_ADMIN,
     "save_settings": _R_ADMIN,
@@ -888,6 +1002,7 @@ ACTION_ROLES = {
     "get_member_profile": _R_STAFF_MGMT,
     "save_role_emails": _R_ADMIN,
     "mail_status": _R_ADMIN,
+    "login_as_log": _R_ADMIN,
     "mail_test": _R_ADMIN,
 
     # ---- Validation folders (AI Check / Plagiarism Check / Test Paper) ----
@@ -907,14 +1022,25 @@ ACTION_ROLES = {
     "validation_decide": ("validator",),
     "validation_set_access": _R_TECH_MGR,
 
-    # ---- client-portal actions (staff may also drive them where the UI allows) ----
-    "client_approve_proposal": _R_ALL_STAFF,
-    "client_approve_paper": _R_ALL_STAFF,
-    "client_approve_implementation": _R_ALL_STAFF,
-    "client_request_correction_proposal": _R_ALL_STAFF,
-    "client_request_correction_paper": _R_ALL_STAFF,
-    "client_request_correction_implementation": _R_ALL_STAFF,
+    # ---- client-portal actions: the CLIENT's own decision. No staff login may call
+    #      them (see CLIENT_ONLY_ACTIONS); staff who need to move on without the client
+    #      use override_client_approval_*, which requires a reason and records who did it.
+    "client_approve_proposal": (),
+    "client_approve_paper": (),
+    "client_approve_implementation": (),
+    "client_request_correction_proposal": (),
+    "client_request_correction_paper": (),
+    "client_request_correction_implementation": (),
 }
+
+# SECURITY (review fix #1): these record "Client approved ..." in the history, so only a
+# client-portal session may call them - not even Admin. They used to be open to every staff
+# login, which let anyone sign off a proposal/implementation/paper in the client's name.
+CLIENT_ONLY_ACTIONS = frozenset({
+    "client_approve_proposal", "client_approve_paper", "client_approve_implementation",
+    "client_request_correction_proposal", "client_request_correction_paper",
+    "client_request_correction_implementation",
+})
 
 
 # =====================================================================
@@ -934,6 +1060,35 @@ def set_principal(session):
 
 def get_principal():
     return getattr(_CURRENT, "session", None)
+
+
+def _current_impersonator():
+    """Who opened the current request's "Log in as" session ('' for a normal login)."""
+    sess = get_principal()
+    try:
+        return (sess.get("impersonated_by") or "") if sess else ""
+    except AttributeError:
+        return ""
+
+
+def log_login_as(con, sess, action, d, ok, ip="", detail=""):
+    """Append one row to the "Log in as" audit trail (and the server log)."""
+    try:
+        con.execute("""INSERT INTO login_as_log (emp_id, emp_name, opened_by, action, client_id, detail, ok, ip)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (sess["emp_id"], sess["emp_name"] or "", sess.get("impersonated_by") or "",
+                     action, str((d or {}).get("clientId") or "")[:64], (detail or "")[:300],
+                     1 if ok else 0, ip or ""))
+        con.commit()
+    except Exception as e:      # auditing must never break the request itself
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        print("[login-as] could not write audit row:", repr(e), file=sys.stderr)
+    print("[login-as] %s as %s: %s%s" % (sess.get("impersonated_by") or "", sess["emp_name"] or "",
+                                          action, "" if ok else " (refused/failed)"),
+          file=sys.stderr, flush=True)
 
 
 def client_family_ids(con, client_id):
@@ -1048,6 +1203,10 @@ def authorize(action, session):
         # Unknown/unmapped action — fail closed.
         raise ApiError("Unknown action.", 404)
 
+    if action in CLIENT_ONLY_ACTIONS:
+        raise ApiError("Only the client can approve or ask for corrections here. To continue without "
+                       "the client, use \"Continue without client approval\" and give a reason.", 403)
+
     role = session["role"] or ""
     if role in ("super_admin", "md_admin"):
         return
@@ -1068,7 +1227,8 @@ def hash_session_token(token):
 
 
 def create_session(con, kind, role, ip="", emp_id=None, emp_uid=None, emp_name=None,
-                    emp_role=None, emp_team_type=None, client_id=None, browser_key=None):
+                    emp_role=None, emp_team_type=None, client_id=None, browser_key=None,
+                    impersonated_by=""):
     # The session is bound to the browser's HttpOnly cookie; without one there is
     # nothing to bind to, so refuse rather than create an unbound session.
     if not browser_key:
@@ -1076,10 +1236,11 @@ def create_session(con, kind, role, ip="", emp_id=None, emp_uid=None, emp_name=N
     token = secrets.token_urlsafe(32)
     csrf = secrets.token_urlsafe(32)
     con.execute("""INSERT INTO sessions (token, kind, role, emp_id, emp_uid, emp_name,
-                       emp_role, emp_team_type, client_id, ip, csrf, browser_key)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       emp_role, emp_team_type, client_id, ip, csrf, browser_key, impersonated_by)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (hash_session_token(token), kind, role, emp_id, emp_uid, emp_name,
-                 emp_role, emp_team_type, client_id, ip, csrf, hash_session_token(browser_key)))
+                 emp_role, emp_team_type, client_id, ip, csrf, hash_session_token(browser_key),
+                 impersonated_by or ""))
     con.commit()
     return {"token": token, "csrf": csrf}
 
@@ -1112,6 +1273,12 @@ def get_session(con, token, browser_key=None):
     # ... and an absolute cap, so a session that is kept warm by a polling tab
     # cannot live forever.
     if _parse(row["created_at"]) < datetime.now() - timedelta(hours=SESSION_MAX_HOURS):
+        con.execute("DELETE FROM sessions WHERE token=?", (hashed,))
+        con.commit()
+        return None
+    # "Log in as" sessions have a much shorter absolute lifetime.
+    if (row.get("impersonated_by") or "") and \
+            _parse(row["created_at"]) < datetime.now() - timedelta(minutes=IMPERSONATION_MAX_MINUTES):
         con.execute("DELETE FROM sessions WHERE token=?", (hashed,))
         con.commit()
         return None
@@ -1165,6 +1332,25 @@ def delete_session(con, token):
         con.commit()
 
 
+def revoke_sessions(con, keep_token=None, role=None, emp_id=None, client_id=None):
+    """SECURITY (review fix #9): sign a login out everywhere after its password changes.
+    Exactly one of role (a department login), emp_id (an employee, incl. their Validation
+    login) or client_id is given. keep_token = the caller's own tab, which stays signed in.
+    The caller commits."""
+    if role:
+        sql, args = "DELETE FROM sessions WHERE kind='dept' AND role=?", [role]
+    elif emp_id is not None:
+        sql, args = "DELETE FROM sessions WHERE kind IN ('employee','validator') AND emp_id=?", [emp_id]
+    elif client_id:
+        sql, args = "DELETE FROM sessions WHERE kind='client' AND client_id=?", [client_id]
+    else:
+        return
+    if keep_token:
+        sql += " AND token<>?"
+        args.append(hash_session_token(keep_token))
+    con.execute(sql, args)
+
+
 # Every task_type the "tasks" table is allowed to store. PROPOSAL/IMPLEMENTATION/
 # PAPER_WRITING are Technical-team work; PROOFREADING/FORMATTING/SUBMISSION are
 # Journal-team work (jmOpenAddTask on the front end). "" means a general/other task
@@ -1179,6 +1365,21 @@ VALID_TASK_TYPES = ("PROPOSAL", "IMPLEMENTATION", "PAPER_WRITING",
 # Technical-team tasks, Journal roles for Journal-team tasks, Admin for anything.
 TASK_COMPLETION_ROLES = ("technical_manager", "technical_tl", "journal_manager", "journal_tl",
                           "md_admin", "super_admin")
+# Which team may approve which task types. A Journal Manager/TL approving a PROPOSAL /
+# IMPLEMENTATION / PAPER_WRITING task would also move the Technical pipeline (see
+# update_task), so each team approves only its own types; general tasks ("") and
+# Admin are unrestricted.
+TECH_TASK_TYPES = ("PROPOSAL", "IMPLEMENTATION", "PAPER_WRITING")
+JOURNAL_TASK_TYPES = ("PROOFREADING", "FORMATTING", "SUBMISSION")
+TASK_TEAM_TYPES = {
+    "technical_manager": TECH_TASK_TYPES, "technical_tl": TECH_TASK_TYPES,
+    "journal_manager": JOURNAL_TASK_TYPES, "journal_tl": JOURNAL_TASK_TYPES,
+}
+# What an individual employee may do to a task assigned to them (everything else -
+# title, assignee, dates, type, priority, approval - is the Manager / TL's job).
+EMPLOYEE_TASK_STATUSES = ("IN_PROGRESS", "SUBMITTED")
+EMPLOYEE_TASK_LOCKED_FIELDS = ("title", "description", "assignedTo", "startDate", "finishDate",
+                               "taskType", "priority")
 
 # ----- "is typing..." indicators (client<->staff chat + internal DMs) -----
 # Deliberately kept in memory, not in the database: it's a fast-expiring signal
@@ -1285,6 +1486,13 @@ STAFF_MGMT_TEAM_ROLES = {
 }
 # SECURITY: roles allowed to administer logins/employees system-wide (Team & Access screen).
 ADMIN_ROLES = ("md_admin", "super_admin")
+# "Log in as this employee": which employees each team manager may open. Super Admin /
+# MD Admin may open any employee.
+EMPLOYEE_LOGIN_AS_TEAMS = {
+    "technical_manager": ("PROGRAMMER", "PAPER_WRITER"),
+    "journal_manager": ("JOURNAL_EMPLOYEE",),
+    "marketing_manager": ("TELECALLER",),
+}
 
 
 def require_team_scope(actor_role, emp_role):
@@ -1395,7 +1603,58 @@ def stageIdxServer(stage):
         return len(STAGES)
 
 
-def portal_link(display_id, token, origin=None):
+# ----- client portal setup codes ("invite" codes) -----
+# SECURITY: these used to be 8 hex characters (32 bits) that never expired. They are now
+# 12 characters from an easy-to-type alphabet (60 bits, shown as XXXX-XXXX-XXXX) and stop
+# working INVITE_CODE_DAYS after they were last issued / re-sent. Dashes, spaces and
+# letter case are ignored when the client types the code.
+INVITE_CODE_DAYS = max(1, int(_env("INVITE_CODE_DAYS", "7")))
+_INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"     # no 0/O/1/I
+
+
+def new_invite_code():
+    raw = "".join(secrets.choice(_INVITE_ALPHABET) for _ in range(12))
+    return "-".join((raw[0:4], raw[4:8], raw[8:12]))
+
+
+def normalize_invite_code(value):
+    return re.sub(r"[\s-]", "", str(value or "")).upper()[:64]
+
+
+def invite_code_expired(sent_at):
+    """True when a setup code issued at `sent_at` may no longer be used (or the issue
+    time is unknown)."""
+    try:
+        issued = datetime.strptime(str(sent_at or "")[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return True
+    return issued < datetime.now() - timedelta(days=INVITE_CODE_DAYS)
+
+
+def live_invite_code(c):
+    """A fresh setup code. SECURITY (A-grade hardening): only a keyed hash of the code is
+    stored (invite_hash), so the database and its backups never hold a usable code. The
+    flip side: a code can't be shown again, so copying or re-sending an invitation issues
+    a new code and the previous one stops working."""
+    return new_invite_code()
+
+
+def invite_hash(code):
+    key = hmac.new(SECRET_KEY.encode("utf-8"), b"invite-v1", hashlib.sha256).digest()
+    return "ih1$" + hmac.new(key, normalize_invite_code(code).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def invite_matches(stored, typed):
+    stored = (stored or "").strip()
+    if not stored or not normalize_invite_code(typed):
+        return False
+    if stored.startswith("ih1$"):
+        return hmac.compare_digest(stored, invite_hash(typed))
+    # codes sent before this change were stored as typed; they keep working until they expire
+    return hmac.compare_digest(normalize_invite_code(stored), normalize_invite_code(typed))
+
+
+def portal_link(display_id, token, origin=None, request_host=""):
     """Direct one-click link that opens the portal straight into the
     'create your password' screen with the Client ID and setup code
     already filled in.
@@ -1409,8 +1668,19 @@ def portal_link(display_id, token, origin=None):
     literally never works if it falls back to localhost, since 'localhost'
     on the CLIENT's own phone/laptop just points back to their own device,
     not this server."""
+    # SECURITY: this link goes out in an e-mail from the company account, so its address
+    # must not be whatever the caller typed. APP_BASE_URL wins; otherwise the browser's
+    # origin is only used when it is this very server (same host as the request).
+    if APP_BASE_URL:
+        return f"{APP_BASE_URL}/?setup={display_id}:{token}"
     if origin:
-        return f"{origin.rstrip('/')}/?setup={display_id}:{token}"
+        try:
+            p = urlparse(str(origin).strip())
+        except ValueError:
+            p = None
+        if p and p.scheme in ("http", "https") and p.netloc and request_host \
+                and p.netloc.lower() == request_host.strip().lower():
+            return f"{p.scheme}://{p.netloc}/?setup={display_id}:{token}"
     ip = lan_ip()
     host = f"{ip}:{PORT}" if ip and ip != "127.0.0.1" else f"localhost:{PORT}"
     return f"http://{host}/?setup={display_id}:{token}"
@@ -1444,7 +1714,7 @@ def invite_email_html(name, display_id, token, link):
         </tr>
         <tr>
           <td style="padding:16px 20px;">
-            <div style="font-size:12px;color:#8a7a4e;letter-spacing:.4px;text-transform:uppercase;">One-time setup code</div>
+            <div style="font-size:12px;color:#8a7a4e;letter-spacing:.4px;text-transform:uppercase;">One-time setup code &middot; valid for {INVITE_CODE_DAYS} days</div>
             <div style="font-size:19px;font-weight:800;color:#1a1a1a;margin-top:3px;letter-spacing:1px;">{esc_html(token)}</div>
           </td>
         </tr>
@@ -1579,6 +1849,13 @@ class PGCursor:
         if wants_id:
             row = self._cur.fetchone()
             self.lastrowid = row["id"] if row else None
+            # AUDIT: a client-history entry written while a manager is signed in as a
+            # team member ("Log in as") records who really did it. Same transaction,
+            # same row id, so it can never tag someone else's entry.
+            if self.lastrowid is not None and m.group(1).lower() == "history":
+                via = _current_impersonator()
+                if via:
+                    self._cur.execute("UPDATE history SET via=%s WHERE id=%s", (via, self.lastrowid))
         return self
 
     def fetchone(self):
@@ -2014,9 +2291,8 @@ def init_db():
     _existing_users = {r["role"] for r in con.execute("SELECT role FROM users")}
     _admin_hash = ""
     if INITIAL_ADMIN_PASSWORD:
-        if len(INITIAL_ADMIN_PASSWORD) < MIN_PASSWORD_LENGTH:
-            raise SystemExit("FATAL: INITIAL_ADMIN_PASSWORD must be at least %d characters."
-                             % MIN_PASSWORD_LENGTH)
+        if len(INITIAL_ADMIN_PASSWORD) < 8:
+            raise SystemExit("FATAL: INITIAL_ADMIN_PASSWORD must be at least 8 characters.")
         _admin_hash = hash_password(INITIAL_ADMIN_PASSWORD)
     elif not _existing_users:
         if IS_PRODUCTION:
@@ -2416,6 +2692,29 @@ def init_db():
     # Tab-scoped sessions: every session must be bound to a browser cookie. Sessions
     # created before this change have no binding and are ended (users sign in once).
     con.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS browser_key TEXT DEFAULT ''")
+    # "Log in as this employee": who opened this session on the employee's behalf.
+    con.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS impersonated_by TEXT DEFAULT ''")
+    # ...and on every client-history entry made in such a session (shown as "via ...").
+    con.execute("ALTER TABLE history ADD COLUMN IF NOT EXISTS via TEXT DEFAULT ''")
+    # Audit trail of everything done in a "Log in as" session (who, as whom, what, when).
+    con.execute("""CREATE TABLE IF NOT EXISTS login_as_log (
+        id SERIAL PRIMARY KEY,
+        emp_id INTEGER,
+        emp_name TEXT NOT NULL DEFAULT '',
+        opened_by TEXT NOT NULL DEFAULT '',
+        action TEXT NOT NULL DEFAULT '',
+        client_id TEXT NOT NULL DEFAULT '',
+        detail TEXT NOT NULL DEFAULT '',
+        ok INTEGER NOT NULL DEFAULT 1,
+        ip TEXT NOT NULL DEFAULT '',
+        created_at TEXT DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS')))""")
+    con.execute("""CREATE TABLE IF NOT EXISTS employee_login_tickets (
+        ticket TEXT PRIMARY KEY,           -- HMAC of the one-time ticket, never the ticket itself
+        emp_id INTEGER NOT NULL,
+        created_by TEXT NOT NULL DEFAULT '',
+        browser_key TEXT NOT NULL DEFAULT '',
+        expires_at TEXT NOT NULL,
+        created_at TEXT DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS')))""")
     con.execute("DELETE FROM sessions WHERE browser_key IS NULL OR browser_key = ''")
     con.execute("CREATE INDEX IF NOT EXISTS idx_sessions_browser_key ON sessions (browser_key)")
     con.commit()
@@ -2461,8 +2760,8 @@ def _xlsx_first_sheet_path(z, names_in_zip):
     not just the first sheet*.xml in the zip listing - a workbook re-saved by Excel
     or with an extra "Instructions" tab can list them in any order."""
     try:
-        wb = ET.fromstring(z.read("xl/workbook.xml"))
-        rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+        wb = ET.fromstring(_read_zip_part(z, "xl/workbook.xml"))
+        rels = ET.fromstring(_read_zip_part(z, "xl/_rels/workbook.xml.rels"))
         first = wb.find(XLSX_NS + "sheets/" + XLSX_NS + "sheet")
         rid = first.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
         for rel in rels:
@@ -2479,14 +2778,44 @@ def _xlsx_first_sheet_path(z, names_in_zip):
                  if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")), None)
 
 
+XLSX_MAX_PART_BYTES = int(_env("XLSX_MAX_PART_BYTES", str(40 * 1024 * 1024)))
+XLSX_MAX_TOTAL_BYTES = int(_env("XLSX_MAX_TOTAL_BYTES", str(80 * 1024 * 1024)))
+
+
+def _open_xlsx_zip(file_bytes):
+    """SECURITY (review fix #8): an .xlsx is a zip, and a tiny upload can unzip to gigabytes
+    (a "zip bomb" - a 0.5 MB file took the worker up by ~750 MB in testing). The sizes are
+    checked from the zip directory before anything is decompressed, and each part is read
+    with a hard cap in case the directory lies."""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(file_bytes))
+        infos = z.infolist()
+    except (zipfile.BadZipFile, ValueError, OSError):
+        raise ApiError("That file doesn't look like a valid .xlsx workbook.")
+    if len(infos) > 2000:
+        raise ApiError("That workbook has too many parts to import.")
+    if sum(i.file_size for i in infos) > XLSX_MAX_TOTAL_BYTES or \
+            any(i.file_size > XLSX_MAX_PART_BYTES for i in infos):
+        raise ApiError("That workbook is too large to import. Save it as .csv, or split it into smaller files.")
+    return z
+
+
+def _read_zip_part(z, name):
+    with z.open(name) as f:
+        data = f.read(XLSX_MAX_PART_BYTES + 1)
+    if len(data) > XLSX_MAX_PART_BYTES:
+        raise ApiError("That workbook is too large to import. Save it as .csv, or split it into smaller files.")
+    return data
+
+
 def read_xlsx_rows(file_bytes):
     """Minimal .xlsx reader (first worksheet only), stdlib-only (zipfile + XML) -
     no openpyxl / pandas required, so this keeps working on a plain Python install."""
-    z = zipfile.ZipFile(io.BytesIO(file_bytes))
+    z = _open_xlsx_zip(file_bytes)
     names_in_zip = z.namelist()
     shared = []
     if "xl/sharedStrings.xml" in names_in_zip:
-        root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+        root = ET.fromstring(_read_zip_part(z, "xl/sharedStrings.xml"))
         for si in root.findall(XLSX_NS + "si"):
             texts = si.findall(XLSX_NS + "t")
             if texts:
@@ -2498,7 +2827,7 @@ def read_xlsx_rows(file_bytes):
     sheet_path = _xlsx_first_sheet_path(z, names_in_zip)
     if not sheet_path:
         raise ApiError("That file doesn't look like a valid .xlsx workbook.")
-    root = ET.fromstring(z.read(sheet_path))
+    root = ET.fromstring(_read_zip_part(z, sheet_path))
     sheet_data = root.find(XLSX_NS + "sheetData")
     rows = []
     if sheet_data is None:
@@ -3387,15 +3716,19 @@ def _send_smtp(msg, rcpts):
     pwd = GMAIL_APP_PASSWORD.replace(" ", "")
     user = GMAIL_USER.strip()
     last = None
+    # SECURITY (review fix #7): smtplib's default TLS context does NOT check the server's
+    # certificate, so anyone on the network path could pose as smtp.gmail.com and collect
+    # the app password. A default context verifies the certificate and the host name.
+    tls = ssl.create_default_context()
     for port in (465, 587):
         try:
             if port == 465:
-                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15) as smtp:
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15, context=tls) as smtp:
                     smtp.login(user, pwd)
                     smtp.sendmail(user, rcpts, msg.as_string())
             else:
                 with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as smtp:
-                    smtp.starttls()
+                    smtp.starttls(context=tls)
                     smtp.login(user, pwd)
                     smtp.sendmail(user, rcpts, msg.as_string())
             return
@@ -3442,14 +3775,75 @@ def deliver_mail(to_list, subject, body, cc_list=None, html=None, note="", attac
 
 
 def send_mail_async(to_list, subject, body, cc_list=None, note="", attachments=None):
-    """Send in a background thread so the button the user clicked never waits on
-    the mail server. The result (sent or the exact error) goes to the mail log."""
+    """Queue an email; the button the user clicked never waits on the mail server.
+    RELIABILITY (A-grade hardening): the email is saved in the mail_outbox table first and
+    a background sender delivers it, retrying with back-off (1, 5, 15, 60 min ...). A
+    restart or deploy no longer loses mail that was still being sent - the sender picks
+    the queue up again when the app starts. The result still goes to the mail log."""
     to_list = [t for t in (to_list or []) if EMAIL_RE.match(t or "")]
     if not mail_method() or not to_list:
         return False
-    threading.Thread(target=deliver_mail, args=(to_list, subject, body, cc_list),
-                     kwargs={"note": note, "attachments": attachments or None}, daemon=True).start()
+    payload = json.dumps({"to": to_list, "subject": subject, "body": body, "cc": list(cc_list or []),
+                          "note": note, "attachments": attachments or None})
+    con = db()
+    try:
+        con.execute("INSERT INTO mail_outbox (payload, next_at) VALUES (?, ?)", (payload, time.time()))
+        con.commit()
+    finally:
+        con.close()
+    _OUTBOX_WAKE.set()
     return True
+
+
+_OUTBOX_WAKE = threading.Event()
+_OUTBOX_RETRY_MINUTES = (1, 5, 15, 60, 180, 720)
+
+
+def _outbox_send_due():
+    """Send every queued email that is due. Rows are claimed with SKIP LOCKED, so two
+    workers never send the same email."""
+    while True:
+        con = db()
+        try:
+            row = con.execute("""SELECT id, payload, tries FROM mail_outbox WHERE next_at <= ?
+                                 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED""", (time.time(),)).fetchone()
+            if not row:
+                con.rollback()
+                return
+            m = json.loads(row["payload"])
+            ok, err = deliver_mail(m["to"], m["subject"], m["body"], m.get("cc") or None,
+                                   note=m.get("note") or "", attachments=m.get("attachments"))
+            tries = (row["tries"] or 0) + 1
+            if ok or tries > len(_OUTBOX_RETRY_MINUTES):
+                if not ok:
+                    print("[email] giving up after %d tries: %s" % (tries, m["subject"]), file=sys.stderr, flush=True)
+                con.execute("DELETE FROM mail_outbox WHERE id=?", (row["id"],))
+            else:
+                con.execute("UPDATE mail_outbox SET tries=?, next_at=?, last_error=? WHERE id=?",
+                            (tries, time.time() + 60 * _OUTBOX_RETRY_MINUTES[tries - 1], (err or "")[:400],
+                             row["id"]))
+            con.commit()
+        except Exception as e:
+            try:
+                con.rollback()
+            except Exception:
+                pass
+            print("[email] outbox error:", repr(e), file=sys.stderr, flush=True)
+            return
+        finally:
+            con.close()
+
+
+def _outbox_loop():
+    while True:
+        _OUTBOX_WAKE.wait(30)
+        _OUTBOX_WAKE.clear()
+        _outbox_send_due()
+
+
+def start_outbox_sender():
+    threading.Thread(target=_outbox_loop, name="mail-outbox", daemon=True).start()
+    _OUTBOX_WAKE.set()          # deliver anything left over from before a restart
 
 
 class _Outbox:
@@ -3816,9 +4210,18 @@ def employee_visible_client_ids(con, emp_id, emp_name, tasks, queries):
     visible = set()
     name = (emp_name or "").strip()
     if name:
-        like = "%" + name + "%"
+        # LIKE only pre-filters the comma-separated name lists; the exact match below
+        # stops "Ram" from also seeing every client assigned to "Ramesh". Wildcards in
+        # the name itself are escaped so they match literally.
+        like = "%" + name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        list_cols = ("assigned_programmers", "assigned_writers", "assigned_formatters",
+                     "assigned_proofreaders", "pre_impl_programmers", "pre_write_writers")
         for r in con.execute(
-            """SELECT id FROM clients
+            """SELECT id, proposal_writer, proposal_coordinator, impl_coordinator, coordinator_name,
+                      format_coordinator, proofread_coordinator, technical_person,
+                      assigned_programmers, assigned_writers, assigned_formatters,
+                      assigned_proofreaders, pre_impl_programmers, pre_write_writers
+               FROM clients
                WHERE proposal_writer=? OR proposal_coordinator=? OR impl_coordinator=?
                   OR coordinator_name=? OR format_coordinator=? OR proofread_coordinator=?
                   OR technical_person=?
@@ -3827,7 +4230,12 @@ def employee_visible_client_ids(con, emp_id, emp_name, tasks, queries):
                   OR pre_impl_programmers LIKE ? OR pre_write_writers LIKE ?""",
                 (name, name, name, name, name, name, name,
                  like, like, like, like, like, like)):
-            visible.add(r["id"])
+            single = (r["proposal_writer"], r["proposal_coordinator"], r["impl_coordinator"],
+                      r["coordinator_name"], r["format_coordinator"], r["proofread_coordinator"],
+                      r["technical_person"])
+            if name in single or any(
+                    name in [x.strip() for x in (r[col] or "").split(",")] for col in list_cols):
+                visible.add(r["id"])
     for t in tasks or []:
         # BUGFIX: task rows carry "assigned_to" (a comma-separated list of names), not
         # "assignedTo" — so a task the Technical Manager assigned from the Tasks page never
@@ -3840,6 +4248,173 @@ def employee_visible_client_ids(con, emp_id, emp_name, tasks, queries):
             if q.get("client_id"):
                 visible.add(q["client_id"])
     return visible
+
+
+def employee_client_scope(con, d, tasks=None, queries=None):
+    """The clients an individually-added employee may see and act on: exactly the set
+    bootstrap sends to their dashboard. Returns (visible_ids, own_lead_ids).
+
+    `d` is the request data after the HTTP layer bound it to the session (empId,
+    empName, empRole, empTeamType). tasks / queries may be passed in when the caller
+    already loaded them; otherwise only the columns needed here are read."""
+    emp_name = (d.get("empName") or "").strip()
+    emp_id = d.get("empId")
+    if tasks is None:
+        tasks = [dict(r) for r in con.execute(
+            "SELECT client_id, assigned_to FROM tasks WHERE COALESCE(client_id,'')<>''")]
+    if queries is None:
+        queries = [dict(r) for r in con.execute(
+            "SELECT client_id, assigned_to FROM client_queries WHERE COALESCE(client_id,'')<>''")]
+    visible = employee_visible_client_ids(con, emp_id, emp_name, tasks, queries)
+    # BDC staff: their own leads (added by them, or they're named as the BDC).
+    own_leads = set()
+    if (d.get("empRole") or "") == "TELECALLER" and emp_name:
+        for r in con.execute("""SELECT DISTINCT client_id FROM history
+                                WHERE stage='NEW' AND actor=?""", (emp_name,)):
+            own_leads.add(r["client_id"])
+        for r in con.execute("SELECT id FROM clients WHERE LOWER(TRIM(bdc))=LOWER(?)", (emp_name,)):
+            own_leads.add(r["id"])
+        visible |= own_leads
+    # Submission team: every paper waiting to be submitted, and the ones they submitted.
+    if (d.get("empRole") or "") == "JOURNAL_EMPLOYEE" and (d.get("empTeamType") or "") == "SUBMISSION":
+        for r in con.execute("""SELECT id FROM clients WHERE stage IN ('SUBMISSION','JOURNAL_SUBMITTED')
+                                OR submission_person=?""", (emp_name,)):
+            visible.add(r["id"])
+    return visible, own_leads
+
+
+def is_individual_employee(d):
+    """True when the caller is an individually-added team member (programmer, writer,
+    journal team, BDC staff) rather than a department login or Admin."""
+    return (d.get("role") or "") == "employee"
+
+
+def require_employee_client_access(con, d, client_id):
+    """SECURITY (object-level access): department logins share the full client list by
+    product design, but an individual employee may only reach the clients on their
+    own dashboard. Raises 403 otherwise; a no-op for everyone else."""
+    if not is_individual_employee(d):
+        return
+    visible, _ = employee_client_scope(con, d)
+    if client_id not in visible:
+        raise ApiError("You don't have access to that client.", 403)
+
+
+def employee_can_see_task(con, d, task_row):
+    """Same rule bootstrap uses for an employee's task list: their own tasks, plus
+    tasks on clients they work on."""
+    if task_assigned_to(task_row, (d.get("empName") or "").strip()):
+        return True
+    cid = task_row["client_id"] if "client_id" in task_row.keys() else None
+    if not cid:
+        return False
+    visible, _ = employee_client_scope(con, d)
+    return cid in visible
+
+
+def require_employee_task_access(con, d, task_id):
+    """Individual employees may touch only the tasks shown on their own dashboard."""
+    if not is_individual_employee(d):
+        return
+    row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row and not employee_can_see_task(con, d, row):
+        raise ApiError("You don't have access to that task.", 403)
+
+
+# Individual employees: actions that name a client directly (clientId) and may only
+# touch the clients on that employee's own dashboard.
+EMPLOYEE_SCOPED_CLIENT_ACTIONS = frozenset({
+    "get_thread", "send_message", "chat_typing", "add_client_note", "add_client_document",
+    "add_query", "add_work_update", "request_hold", "request_deadline_extension",
+})
+# ... and actions that name a task (by the given field) instead.
+EMPLOYEE_SCOPED_TASK_ACTIONS = {"update_task": "id", "add_task_comment": "taskId", "add_task_stage": "taskId"}
+
+
+def _int_or_none(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def enforce_employee_object_scope(con, action, d):
+    """SECURITY (broken object-level authorization): the role matrix lets every staff
+    member call these actions, and department logins share the full client list by
+    design - but an individual employee (programmer, writer, journal team, BDC) used to
+    be able to read any client's documents and chat, or edit any task, just by sending
+    its id. They are now limited to what their own dashboard shows. Department logins
+    and Admin are unaffected."""
+    if action in PUBLIC_ACTIONS or not is_individual_employee(d):
+        return
+    if action in EMPLOYEE_SCOPED_CLIENT_ACTIONS:
+        cid = (d.get("clientId") or "").strip()
+        if cid:
+            require_employee_client_access(con, d, cid)
+    elif action == "get_client_document":
+        doc_id = _int_or_none(d.get("id"))
+        row = con.execute("SELECT client_id FROM client_documents WHERE id=?", (doc_id,)).fetchone() \
+            if doc_id is not None else None
+        if row:
+            require_employee_client_access(con, d, row["client_id"])
+    elif action == "update_query":
+        qid = _int_or_none(d.get("id"))
+        row = con.execute("SELECT client_id, assigned_to FROM client_queries WHERE id=?", (qid,)).fetchone() \
+            if qid is not None else None
+        if row and (row["assigned_to"] or "").strip() != (d.get("empName") or "").strip():
+            require_employee_client_access(con, d, row["client_id"])
+    elif action in EMPLOYEE_SCOPED_TASK_ACTIONS:
+        tid = _int_or_none(d.get(EMPLOYEE_SCOPED_TASK_ACTIONS[action]))
+        if tid is not None:
+            require_employee_task_access(con, d, tid)
+    elif action in ("update_task_stage", "reorder_task_stage"):
+        sid = _int_or_none(d.get("id"))
+        row = con.execute("SELECT task_id FROM task_stages WHERE id=?", (sid,)).fetchone() \
+            if sid is not None else None
+        if row:
+            require_employee_task_access(con, d, row["task_id"])
+    if action in STEP_ASSIGNEE_COLUMNS:
+        require_step_assignee(con, action, d)
+
+
+# SECURITY (review fix #2): pipeline steps an individual employee may only take on a
+# client where they hold the matching assignment - the same rule the dashboard uses to
+# show them the button. Before this, any team member could submit, approve or send back
+# work on any client just by sending its id. Department logins (Technical / Journal
+# Manager & TL) are limited to their own team's steps by ACTION_ROLES instead.
+STEP_ASSIGNEE_COLUMNS = {
+    "submit_proposal": ("proposal_writer", "proposal_coordinator"),
+    "coordinator_take_proposal": ("proposal_coordinator",),
+    "coordinator_assign_proposal_writer": ("proposal_coordinator",),
+    "coordinator_take_implementation": ("impl_coordinator",),
+    "coordinator_assign_implementation_team": ("impl_coordinator",),
+    "coordinator_take_writing": ("coordinator_name",),
+    "coordinator_assign_writing_team": ("coordinator_name",),
+    "coordinator_decision": ("coordinator_name",),
+    "submit_writing_demo": ("assigned_writers",),
+    "writer_resubmit": ("assigned_writers",),
+    "writer_resubmit_proofread": ("assigned_writers",),
+    "mark_writing_completed": ("assigned_writers",),
+    "complete_formatting": ("format_coordinator", "assigned_formatters"),
+    "format_decision": ("format_coordinator", "assigned_formatters"),
+    "proofread_decision": ("proofread_coordinator", "assigned_proofreaders"),
+    "proofread_request_correction": ("proofread_coordinator", "assigned_proofreaders"),
+}
+
+
+def require_step_assignee(con, action, d):
+    """Raise 403 unless the calling individual employee is named in one of the client
+    columns that own this step. A no-op for department logins and Admin."""
+    if not is_individual_employee(d):
+        return
+    me = (d.get("empName") or "").strip()
+    row = con.execute("SELECT * FROM clients WHERE id=?", ((d.get("clientId") or "").strip(),)).fetchone()
+    if not row:
+        return          # the handler answers "Client not found."
+    for col in STEP_ASSIGNEE_COLUMNS[action]:
+        if me and me in [n.strip() for n in names(row[col])]:
+            return
+    raise ApiError("This step belongs to the team member assigned to it on this client.", 403)
 
 
 def validation_caller(con, d):
@@ -4212,7 +4787,9 @@ def all_clients(con):
             "altMobile": r["alt_mobile"] or "", "institutionalEmail": r["institutional_email"] or "",
             "department": r["department"] or "", "referredBy": r["referred_by"] or "",
             "hasClientLogin": bool(r["client_password"]), "inviteSentAt": r["invite_sent_at"] or "",
-            "inviteToken": (r["invite_token"] or "") if not r["client_password"] else "",
+            # SECURITY (review fix #11): the pending portal setup code is a credential. It used
+            # to go to every department dashboard on every 12-second refresh; the page never
+            # used it. Staff who share a link get it from create_invite_link only.
             "lastLoginAt": r["last_login_at"] or "",
             "passwordResetRequested": bool(r["password_reset_requested"]),
             "passwordResetRequestedAt": r["password_reset_requested_at"] or "",
@@ -4245,7 +4822,7 @@ def all_clients(con):
                                "status": it["status"], "paidDate": it["paid_date"]}
                               for it in inst_by.get(cid, [])],
             "history": [{"stage": h["stage"], "actor": h["actor"], "at": iso(h["created_at"]),
-                         "note": h["note"] or ""}
+                         "note": h["note"] or "", "via": h.get("via") or ""}
                         for h in hist_by.get(cid, [])],
             # When each pipeline stage was reached, and by whom — for the project Task Board.
             # Kept separate from "history" (which carries internal notes and is stripped for
@@ -5599,8 +6176,8 @@ def build_old_work_xlsx():
         ["Installments", "Saved as the client's split-up, exactly like Add Client. Paid ones count as collected "
                          "on their Paid Date; Pending ones show under Pending Amount for Accounts to collect."],
         ["No installments?", "The balance (Total - Registration) is saved as one pending \"Balance\" installment."],
-        ["More than 6?", f"Add more columns named \"Installment 7 Title\", \"Installment 7 Amount\", "
-                         f"\"Installment 7 Status\", \"Installment 7 Paid Date\" (and 8, 9 ...)."],
+        ["More than 6?", "Add more columns named \"Installment 7 Title\", \"Installment 7 Amount\", "
+                         "\"Installment 7 Status\", \"Installment 7 Paid Date\" (and 8, 9 ...)."],
         ["Example", "Total 70000 = Registration 20000 (paid) + Start Work 15000 (paid) + Code Implementation 25000 "
                     "(pending) + Paper Delivery 10000 (pending)  ->  Paid 35000, Pending 35000."],
     ]
@@ -5945,8 +6522,33 @@ def _clean_aadhaar(raw):
     return re.sub(r"[\s-]", "", str(raw or ""))
 
 
+# SECURITY (A-grade hardening): the full Aadhaar number is never stored. The app only ever
+# needs two things from it - "is this the same person?" (duplicate check) and the last 4
+# digits for display - so it keeps a keyed hash plus the last 4 digits:
+#     aah1$<last 4>$<HMAC-SHA256 of the 12 digits>
+# A leaked database or backup therefore contains no Aadhaar numbers, and there is no
+# encryption key to lose. Plain numbers already in the database are converted at start-up.
+_AADHAAR_PREFIX = "aah1$"
+
+
+def _aadhaar_key():
+    return hmac.new(SECRET_KEY.encode("utf-8"), b"aadhaar-v1", hashlib.sha256).digest()
+
+
+def store_aadhaar(value):
+    """12 plain digits -> stored form. Already-stored values and '' pass through."""
+    v = (value or "").strip()
+    if not v or v.startswith(_AADHAAR_PREFIX):
+        return v
+    digits = _clean_aadhaar(v)
+    return "%s%s$%s" % (_AADHAAR_PREFIX, digits[-4:],
+                        hmac.new(_aadhaar_key(), digits.encode("utf-8"), hashlib.sha256).hexdigest())
+
+
 def _mask_aadhaar(a):
     a = a or ""
+    if a.startswith(_AADHAAR_PREFIX):
+        return "XXXX XXXX " + a[len(_AADHAAR_PREFIX):len(_AADHAAR_PREFIX) + 4]
     return ("XXXX XXXX " + a[-4:]) if len(a) >= 4 else ""
 
 
@@ -5957,11 +6559,34 @@ def _find_duplicate_employee(con, phone, aadhaar, exclude_id=None):
         return None
     sql = ("SELECT id, name, emp_uid FROM employees WHERE phone=? AND aadhaar=? "
            "AND active=1 AND deleted_at IS NULL")
-    args = [phone, aadhaar]
+    args = [phone, store_aadhaar(aadhaar)]
     if exclude_id is not None:
         sql += " AND id<>?"
         args.append(exclude_id)
     return con.execute(sql, args).fetchone()
+
+
+def employee_name_taken(con, name, exclude_id=None):
+    """SECURITY (review fix #4): assignments, tasks and dashboard visibility are matched on
+    the employee's display name, so two team members with the same name would share each
+    other's clients, chats and work. Until assignments store employee IDs, a name may be
+    used by only one non-deleted employee (case and surrounding spaces ignored).
+    Returns the clashing row, or None."""
+    key = (name or "").strip().lower()
+    if not key:
+        return None
+    sql = "SELECT id, name, emp_uid FROM employees WHERE LOWER(TRIM(name))=? AND deleted_at IS NULL"
+    args = [key]
+    if exclude_id is not None:
+        sql += " AND id<>?"
+        args.append(exclude_id)
+    return con.execute(sql, args).fetchone()
+
+
+def employee_name_taken_msg(row):
+    return ("%s (%s) already uses that name. Names must be unique because work is assigned by name "
+            "- add an initial or a place, for example \"%s K.\" or \"%s (Chennai)\"."
+            % (row["name"], row["emp_uid"] or "no ID", row["name"], row["name"]))
 
 
 def _next_emp_uid(con):
@@ -5982,6 +6607,8 @@ def _import_team_rows(con, rows, actor_role=""):
         name = (rec.get("name") or "").strip()
         if not name:
             skipped += 1; errors.append(f"Row {idx}: missing a name, skipped."); continue
+        if person_name_problem(name):
+            skipped += 1; errors.append(f"Row {idx}: {person_name_problem(name)} Skipped."); continue
         role = TEAM_ROLE_ALIASES.get((rec.get("role") or "").strip().upper())
         if not role:
             skipped += 1
@@ -6010,6 +6637,12 @@ def _import_team_rows(con, rows, actor_role=""):
             errors.append(f"Row {idx}: {name} — this employee already exists "
                           f"({dup['name']}, {dup['emp_uid'] or 'no ID'}: same phone and Aadhaar), skipped.")
             continue
+        clash = employee_name_taken(con, name)
+        if clash:
+            skipped += 1
+            errors.append(f"Row {idx}: {name} — the name is already used by {clash['name']} "
+                          f"({clash['emp_uid'] or 'no ID'}); names must be unique, skipped.")
+            continue
         manual_uid = (rec.get("empUid") or "").strip()
         if manual_uid:
             if con.execute("SELECT id FROM employees WHERE UPPER(emp_uid)=UPPER(?)", (manual_uid,)).fetchone():
@@ -6027,7 +6660,7 @@ def _import_team_rows(con, rows, actor_role=""):
                      "",   # SECURITY: no password set — the manager must issue one
                      (rec.get("joiningDate") or "").strip(), (rec.get("dateOfBirth") or "").strip(),
                      normalize_branch_name(rec.get("branch")), (rec.get("department") or "").strip(),
-                     imp_phone, (rec.get("designation") or "").strip(), imp_aadhaar))
+                     imp_phone, (rec.get("designation") or "").strip(), store_aadhaar(imp_aadhaar)))
         added += 1
     con.commit()
     return {"ok": True, "added": added, "skipped": skipped, "errors": errors[:30]}
@@ -6493,6 +7126,9 @@ def employee_reset_email_body(name, uid, code):
 def _handle_action_core(action, d, ip=""):
     con = db()
     try:
+        # Object-level checks for individual employees (documents, chat, tasks...).
+        enforce_employee_object_scope(con, action, d)
+
         # SECURITY: "login_options" was removed. It returned every employee's name,
         # role, team and ID to anonymous callers so the login screen could show
         # employee cards. Employees now type their ID instead.
@@ -6504,7 +7140,9 @@ def _handle_action_core(action, d, ip=""):
             if not sess:
                 return {"authenticated": False}
             out = {"authenticated": True, "kind": sess["kind"], "role": sess["role"],
-                   "csrfToken": sess["csrf"]}
+                   "csrfToken": sess["csrf"],
+                   "impersonatedBy": (sess["impersonated_by"] if "impersonated_by" in sess.keys() else "") or "",
+                   "impersonationMinutes": IMPERSONATION_MAX_MINUTES}
             if sess["kind"] in ("employee", "validator"):
                 out.update({"empId": sess["emp_id"], "empUid": sess["emp_uid"],
                             "empName": sess["emp_name"], "empRole": sess["emp_role"],
@@ -6524,6 +7162,69 @@ def _handle_action_core(action, d, ip=""):
                 out["_clear_cookie"] = True
             return out
 
+        if action == "create_employee_login_link":
+            # One-click "Log in as this employee". Returns a single-use ticket that is
+            # valid for 60 seconds, only in THIS browser (bound to its HttpOnly cookie),
+            # and only for an employee the caller is allowed to manage.
+            caller = d.get("role") or ""
+            if caller not in ADMIN_ROLES and caller not in EMPLOYEE_LOGIN_AS_TEAMS:
+                raise ApiError("You don't have permission to do that.", 403)
+            try:
+                target_id = int(d.get("targetEmpId"))
+            except (TypeError, ValueError):
+                raise ApiError("Choose a team member.")
+            e = con.execute("SELECT * FROM employees WHERE id=? AND deleted_at IS NULL", (target_id,)).fetchone()
+            if not e:
+                raise ApiError("That team member was not found.")
+            if not e["active"]:
+                raise ApiError("%s's access is revoked - restore it before logging in as them." % e["name"])
+            if caller not in ADMIN_ROLES and e["role"] not in EMPLOYEE_LOGIN_AS_TEAMS[caller]:
+                raise ApiError("You can only log in as members of your own team.", 403)
+            if not d.get("_browser_key"):
+                raise ApiError("Your browser blocked the sign-in cookie. Please allow cookies for this site.")
+            label = (d.get("_principal_label") or caller).strip()
+            ticket = secrets.token_urlsafe(32)
+            con.execute("DELETE FROM employee_login_tickets WHERE expires_at < ?",
+                        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
+            con.execute("""INSERT INTO employee_login_tickets (ticket, emp_id, created_by, browser_key, expires_at)
+                           VALUES (?,?,?,?,?)""",
+                        (hash_session_token(ticket), e["id"], label, hash_session_token(d["_browser_key"]),
+                         (datetime.now() + timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S")))
+            print("[login-as] %s opened %s (%s)" % (label, e["name"], e["emp_uid"]), file=sys.stderr, flush=True)
+            con.commit()
+            return {"ok": True, "ticket": ticket, "empName": e["name"]}
+
+        if action == "redeem_employee_login":
+            # The new tab trades the one-time ticket for a normal employee session.
+            if _rate_limited(ip, "login_as", limit=30, window_seconds=300):
+                raise ApiError("Too many login attempts. Please wait a few minutes and try again.")
+            ticket = (d.get("ticket") or "").strip()
+            row = con.execute("SELECT * FROM employee_login_tickets WHERE ticket=?",
+                              (hash_session_token(ticket),)).fetchone() if ticket else None
+            if row:
+                # Single use, whatever happens next.
+                con.execute("DELETE FROM employee_login_tickets WHERE ticket=?", (row["ticket"],))
+                con.commit()
+            bk = d.get("_browser_key")
+            if (not row or row["expires_at"] < datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    or not bk or not hmac.compare_digest(row["browser_key"] or "", hash_session_token(bk))):
+                raise ApiError("This login link has expired or was opened in another browser. "
+                               "Go back and click \"Log in as\" again.")
+            e = con.execute("SELECT * FROM employees WHERE id=? AND deleted_at IS NULL", (row["emp_id"],)).fetchone()
+            if not e or not e["active"]:
+                raise ApiError("That team member's access is revoked.", 403)
+            delete_session(con, d.get("_session_token"))
+            sess = create_session(con, "employee", "employee", ip=ip, browser_key=bk, emp_id=e["id"],
+                                   emp_uid=e["emp_uid"], emp_name=e["name"], emp_role=e["role"],
+                                   emp_team_type=e["team_type"] or "", impersonated_by=row["created_by"])
+            log_login_as(con, {"emp_id": e["id"], "emp_name": e["name"], "impersonated_by": row["created_by"]},
+                         "login_as_start", {}, True, ip,
+                         "session opened (ends after %d minutes)" % IMPERSONATION_MAX_MINUTES)
+            return {"ok": True, "empId": e["id"], "empName": e["name"], "empRole": e["role"],
+                    "empTeamType": e["team_type"] or "", "empUid": e["emp_uid"],
+                    "impersonatedBy": row["created_by"],
+                    "csrfToken": sess["csrf"], "sessionToken": sess["token"]}
+
         if action == "login_captcha":
             # A fresh, single-use captcha for the login screen (all dashboards).
             if _rate_limited(ip, "login_captcha", limit=60, window_seconds=300):
@@ -6532,13 +7233,25 @@ def _handle_action_core(action, d, ip=""):
 
         if action == "login":
             # SECURITY: brute-force throttling on login attempts, per source IP.
-            if _rate_limited(ip, "login", limit=10, window_seconds=300):
+            if _rate_limited(ip, "login", limit=LOGIN_RATE_PER_IP, window_seconds=300):
                 raise ApiError("Too many login attempts. Please wait a few minutes and try again.")
             # SECURITY: every sign-in — Super Admin, MD Admin, every department role,
             # individual employees and clients — must pass the captcha first. It is
             # checked (and burned) before any account lookup or password check.
             verify_login_captcha(d.get("captchaId"), d.get("captchaAnswer"))
             role = d.get("role") or ""
+            # SECURITY (review fixes #10, #14): wrong passwords are counted per ACCOUNT, so a
+            # guesser is stopped however many addresses they use, and every "wrong ID",
+            # "not set up" and "wrong password" answer is the same, so the login screen can't
+            # be used to find out which employee IDs or client phone numbers exist.
+            acct = "%s:%s" % (role, (d.get("empUid") or d.get("clientKey") or "").strip().upper()[:64])
+            if _rate_peek(acct, "login_fail", LOGIN_FAILS_PER_ACCOUNT, 900):
+                raise ApiError("Too many wrong passwords for this account. Please wait 15 minutes, or use "
+                               "\"Forgot password\".", 429)
+
+            def login_failed(msg):
+                _rate_hit(acct, "login_fail", 900)
+                return ApiError(msg)
             if role == "validator":
                 # The Validation login: same Employee ID + password as the person's normal
                 # login, but only for Technical-team employees the Technical Manager has
@@ -6552,8 +7265,9 @@ def _handle_action_core(action, d, ip=""):
                                 (uid,)).fetchone()
                 # Same generic wording whether the ID is unknown or the password is wrong,
                 # so this screen can't be used to discover who has validation access.
-                if not e or not verify_password(d.get("password") or "", e["password"] or ""):
-                    raise ApiError("Incorrect employee ID or password. Please try again.")
+                # An unknown ID is checked against a dummy hash, so it takes as long as a real one.
+                if not verify_password(d.get("password") or "", (e["password"] or "") if e else _dummy_password_hash()) or not e:
+                    raise login_failed("Incorrect employee ID or password. Please try again.")
                 if not e["active"]:
                     raise ApiError("Your access has been disabled by the Super Admin. Contact them for help.")
                 folders = parse_validation_access(e["validation_access"])
@@ -6576,13 +7290,11 @@ def _handle_action_core(action, d, ip=""):
                 # be able to sign in (delete only sets deleted_at; `active` stays 1).
                 e = con.execute("SELECT * FROM employees WHERE UPPER(emp_uid)=UPPER(?) AND deleted_at IS NULL",
                                 (uid,)).fetchone()
-                if not e:
-                    raise ApiError("The entered User ID was not found. Please check it, or ask your "
-                                   "Technical Manager if your account was removed.")
+                # An unknown ID is checked against a dummy hash, so it takes as long as a real one.
+                if not verify_password(d.get("password") or "", (e["password"] or "") if e else _dummy_password_hash()) or not e:
+                    raise login_failed("Incorrect employee ID or password. Please try again.")
                 if not e["active"]:
                     raise ApiError("Your access has been disabled by the Super Admin. Contact them for help.")
-                if not verify_password(d.get("password") or "", e["password"] or ""):
-                    raise ApiError("Incorrect password. Please try again.")
                 delete_session(con, d.get("_session_token"))   # no session fixation
                 sess = create_session(con, "employee", "employee", ip=ip, browser_key=d.get("_browser_key"), emp_id=e["id"],
                                        emp_uid=e["emp_uid"], emp_name=e["name"], emp_role=e["role"],
@@ -6600,13 +7312,11 @@ def _handle_action_core(action, d, ip=""):
                                       OR REPLACE(phone,' ','')=REPLACE(?,' ','')
                                    ORDER BY created_at DESC, id DESC""",
                                 (key, key, key)).fetchone()
-                if not c:
-                    raise ApiError("No client found with that phone/ID. Ask your telecaller to register you.")
-                if not c["client_password"]:
-                    raise ApiError("Your account isn't set up yet. Check your email for the invitation from "
-                                   "iMatiz, or ask your BDC/Marketing contact to resend it.")
-                if not verify_password(d.get("password") or "", c["client_password"]):
-                    raise ApiError("Incorrect password. Please try again.")
+                if not verify_password(d.get("password") or "",
+                                       (c["client_password"] or "") if c else _dummy_password_hash()) \
+                        or not c or not c["client_password"]:
+                    raise login_failed("Incorrect client ID / phone number or password. First time here? Choose "
+                                       "\"First time? Set your password\" and use the code from your invitation.")
                 con.execute("UPDATE clients SET last_login_at=? WHERE id=?",
                             (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), c["id"]))
                 con.commit()
@@ -6620,10 +7330,98 @@ def _handle_action_core(action, d, ip=""):
             if not u["enabled"]:
                 raise ApiError("This role's access has been disabled by the Super Admin. Contact them for help.")
             if not verify_password(d.get("password") or "", u["password"] or ""):
-                raise ApiError("Incorrect password. Please try again.")
+                raise login_failed("Incorrect password. Please try again.")
+            if u["totp_enabled"] or role_requires_2fa(role):
+                return start_otp_ticket(con, role, u, d.get("_browser_key"), ip)
             delete_session(con, d.get("_session_token"))
             sess = create_session(con, "dept", role, ip=ip, browser_key=d.get("_browser_key"))
             return {"ok": True, "csrfToken": sess["csrf"], "sessionToken": sess["token"]}
+
+        if action == "login_otp":
+            # Second step of a department / Admin sign-in: the 6-digit authenticator code.
+            if _rate_limited(ip, "login_otp", limit=30, window_seconds=300):
+                raise ApiError("Too many attempts. Please wait a few minutes and try again.", 429)
+            ticket = (d.get("otpTicket") or "").strip()
+            row = con.execute("SELECT * FROM login_otp_tickets WHERE ticket=?",
+                              (hash_session_token(ticket),)).fetchone() if ticket else None
+            bk = d.get("_browser_key")
+            if (not row or row["expires_at"] < time.time() or row["tries"] >= OTP_TICKET_TRIES or not bk
+                    or not hmac.compare_digest(row["browser_key"], hash_session_token(bk))):
+                if row:
+                    con.execute("DELETE FROM login_otp_tickets WHERE ticket=?", (row["ticket"],))
+                    con.commit()
+                raise ApiError("This sign-in has expired. Please sign in again.")
+            u = con.execute("SELECT * FROM users WHERE role=?", (row["role"],)).fetchone()
+            if not u or not u["enabled"]:
+                raise ApiError("This role's access has been disabled by the Super Admin.", 403)
+            if row["setup"]:
+                secret, last = unseal(row["secret"]), 0
+            else:
+                secret, last = unseal(u["totp_secret"]), u["totp_last_step"] or 0
+            step = totp_check(secret, d.get("code"), last)
+            if step is None:
+                con.execute("UPDATE login_otp_tickets SET tries=tries+1 WHERE ticket=?", (row["ticket"],))
+                con.commit()
+                _rate_hit("%s:" % row["role"], "login_fail", 900)
+                raise ApiError("That code didn't match. Use the current 6-digit code from your authenticator app.")
+            if row["setup"]:
+                con.execute("UPDATE users SET totp_secret=?, totp_enabled=1, totp_pending='', totp_last_step=? "
+                            "WHERE role=?", (seal(secret), step, row["role"]))
+            else:
+                con.execute("UPDATE users SET totp_last_step=? WHERE role=?", (step, row["role"]))
+            con.execute("DELETE FROM login_otp_tickets WHERE ticket=?", (row["ticket"],))
+            delete_session(con, d.get("_session_token"))
+            sess = create_session(con, "dept", row["role"], ip=ip, browser_key=bk)
+            return {"ok": True, "csrfToken": sess["csrf"], "sessionToken": sess["token"],
+                    "otpJustEnabled": bool(row["setup"])}
+
+        if action in ("otp_status", "otp_setup_start", "otp_setup_confirm", "otp_disable"):
+            sess = get_principal()
+            if not sess or sess["kind"] != "dept":
+                raise ApiError("Two-step sign-in is for Admin and department logins.")
+            my_role = sess["role"]
+            u = con.execute("SELECT * FROM users WHERE role=?", (my_role,)).fetchone()
+            required = role_requires_2fa(my_role)
+            if action == "otp_status":
+                return {"enabled": bool(u["totp_enabled"]), "required": required}
+            if action == "otp_setup_start":
+                secret = new_totp_secret()
+                con.execute("UPDATE users SET totp_pending=? WHERE role=?", (seal(secret), my_role))
+                con.commit()
+                return {"secret": secret, "uri": totp_uri(secret, my_role)}
+            if action == "otp_setup_confirm":
+                secret = unseal(u["totp_pending"])
+                if not secret:
+                    raise ApiError("Start the set-up again.")
+                step = totp_check(secret, d.get("code"))
+                if step is None:
+                    raise ApiError("That code didn't match. Check the phone's time is set automatically and try again.")
+                con.execute("UPDATE users SET totp_secret=totp_pending, totp_pending='', totp_enabled=1, "
+                            "totp_last_step=? WHERE role=?", (step, my_role))
+                con.commit()
+                return {"ok": True}
+            # otp_disable
+            if required:
+                raise ApiError("Two-step sign-in is required for this login and can't be turned off.")
+            if not verify_password(d.get("currentPassword") or "", u["password"] or ""):
+                raise ApiError("Current password is incorrect.")
+            if totp_check(unseal(u["totp_secret"]), d.get("code"), u["totp_last_step"] or 0) is None:
+                raise ApiError("That code didn't match.")
+            con.execute("UPDATE users SET totp_enabled=0, totp_secret='', totp_pending='', totp_last_step=0 "
+                        "WHERE role=?", (my_role,))
+            con.commit()
+            return {"ok": True}
+
+        if action == "admin_reset_otp":
+            # A department login lost the phone with its codes. Its sessions end too.
+            target = (d.get("targetRole") or "").strip()
+            if not con.execute("SELECT 1 FROM users WHERE role=?", (target,)).fetchone():
+                raise ApiError("Unknown role.")
+            con.execute("UPDATE users SET totp_enabled=0, totp_secret='', totp_pending='', totp_last_step=0 "
+                        "WHERE role=?", (target,))
+            revoke_sessions(con, keep_token=d.get("_session_token"), role=target)
+            con.commit()
+            return {"ok": True, "required": role_requires_2fa(target)}
 
         if action == "create_invite_link":
             # Generates (or reuses) a pending setup code and hands back a shareable
@@ -6634,13 +7432,16 @@ def _handle_action_core(action, d, ip=""):
             if actor_role not in INVITE_ROLES:
                 raise ApiError("You don't have permission to create a client invite link.")
             c = get_client(con, client_id)
-            token = c["invite_token"] or secrets.token_hex(4).upper()
-            sent_at = c["invite_sent_at"] or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # A new code every time (only its hash is stored, so the old one can't be shown
+            # again); the previous code stops working.
+            token = live_invite_code(c)
+            sent_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             con.execute("UPDATE clients SET invite_token=?, invite_sent_at=? WHERE id=?",
-                        (token, sent_at, c["id"]))
+                        (invite_hash(token), sent_at, c["id"]))
             con.commit()
             display_id = c["display_id"] or c["id"]
-            return {"ok": True, "token": token, "displayId": display_id, "clientName": c["name"]}
+            return {"ok": True, "token": token, "displayId": display_id, "clientName": c["name"],
+                    "validDays": INVITE_CODE_DAYS}
 
         if action == "send_client_invite":
             client_id = (d.get("clientId") or "").strip()
@@ -6653,14 +7454,14 @@ def _handle_action_core(action, d, ip=""):
             if not _mail_configured():
                 raise ApiError("Email isn't set up yet. Set the Gmail API variables (or GMAIL_USER and "
                                "GMAIL_APP_PASSWORD) in the server's environment, then restart. See README.txt.")
-            token = c["invite_token"] or secrets.token_hex(4).upper()
+            token = live_invite_code(c)
             display_id = c["display_id"] or c["id"]
             origin = (d.get("origin") or "").strip()
-            link = portal_link(display_id, token, origin)
+            link = portal_link(display_id, token, origin, d.get("_request_host") or "")
             plain_body = (f"Hi {c['name']},\n\n"
                     f"Welcome to iMatiz Technology! Your client portal is ready.\n\n"
                     f"Your Client ID (this is your login username): {display_id}\n"
-                    f"Your one-time setup code: {token}\n\n"
+                    f"Your one-time setup code: {token}  (valid for {INVITE_CODE_DAYS} days)\n\n"
                     f"Set your password the easy way — just open this link:\n"
                     f"{link}\n\n"
                     f"Or set it up manually:\n"
@@ -6676,7 +7477,7 @@ def _handle_action_core(action, d, ip=""):
                 raise ApiError("Could not send the invitation email: " + err)
             # Only mark the invite as sent once the email genuinely went out.
             con.execute("UPDATE clients SET invite_token=?, invite_sent_at=? WHERE id=?",
-                        (token, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), c["id"]))
+                        (invite_hash(token), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), c["id"]))
             con.commit()
             return {"ok": True, "email": c["email"], "token": token, "displayId": display_id, "link": link}
 
@@ -6689,19 +7490,26 @@ def _handle_action_core(action, d, ip=""):
             new_password = (d.get("newPassword") or "").strip()
             if not key or not token:
                 raise ApiError("Enter your Client ID and the setup code from your invitation email.")
-            if len(new_password) < MIN_PASSWORD_LENGTH:
-                raise ApiError("Choose a password at least %d characters long." % MIN_PASSWORD_LENGTH)
+            require_strong_password(new_password)
             c = con.execute("""SELECT * FROM clients
                                WHERE LOWER(id)=LOWER(?) OR LOWER(display_id)=LOWER(?)
                                   OR REPLACE(phone,' ','')=REPLACE(?,' ','')
                                ORDER BY created_at DESC, id DESC""", (key, key, key)).fetchone()
             if not c:
                 raise ApiError("No client found with that Client ID or phone number.")
-            if not c["invite_token"] or c["invite_token"].upper() != token:
+            # Per-client cap as well as per-IP, so guesses spread over many addresses
+            # still can't be aimed at one client's code.
+            if _rate_limited("client:%s" % c["id"], "set_client_password_client", limit=10, window_seconds=900):
+                raise ApiError("Too many attempts for this account. Please wait 15 minutes and try again.")
+            if not invite_matches(c["invite_token"], token):
                 raise ApiError("That setup code doesn't match. Double check your invitation email, "
                                "or ask Marketing to resend it.")
+            if invite_code_expired(c["invite_sent_at"]):
+                raise ApiError("That setup code has expired (codes work for %d days). Ask your BDC / "
+                               "Marketing contact to send you a new invitation." % INVITE_CODE_DAYS)
             con.execute("UPDATE clients SET client_password=?, invite_token='', password_reset_requested=0, "
                        "password_reset_requested_at='' WHERE id=?", (hash_password(new_password), c["id"]))
+            revoke_sessions(con, client_id=c["id"])
             con.commit()
             return {"ok": True, "clientId": c["id"]}
 
@@ -6755,8 +7563,7 @@ def _handle_action_core(action, d, ip=""):
             new_pwd = (d.get("newPassword") or "").strip()
             if not uid or not code:
                 raise ApiError("Enter your employee ID and the reset code from the email.")
-            if len(new_pwd) < MIN_PASSWORD_LENGTH:
-                raise ApiError("Choose a password at least %d characters long." % MIN_PASSWORD_LENGTH)
+            require_strong_password(new_pwd)
             bad = ApiError("That reset code is wrong or has expired. Request a new one.")
             e = con.execute("""SELECT * FROM employees WHERE UPPER(emp_uid)=UPPER(?)
                                AND deleted_at IS NULL""", (uid,)).fetchone()
@@ -6803,12 +7610,12 @@ def _handle_action_core(action, d, ip=""):
             if actor_role not in INVITE_ROLES:
                 raise ApiError("You don't have permission to reset a client's password.")
             new_password = (d.get("newPassword") or "").strip()
-            if len(new_password) < MIN_PASSWORD_LENGTH:
-                raise ApiError("Choose a password at least %d characters long." % MIN_PASSWORD_LENGTH)
+            require_strong_password(new_password)
             c = get_client(con, client_id)
             con.execute("""UPDATE clients SET client_password=?, invite_token='', password_reset_requested=0,
                            password_reset_requested_at='' WHERE id=?""",
                         (hash_password(new_password), c["id"]))
+            revoke_sessions(con, client_id=c["id"])
             con.commit()
             return {"ok": True}
 
@@ -6893,6 +7700,12 @@ def _handle_action_core(action, d, ip=""):
                 return {"ok": True}
 
         if action == "bootstrap":
+            # Read the revision BEFORE loading anything: a change that lands while this
+            # runs makes the next poll reload again rather than being missed.
+            data_rev = current_data_rev(con)
+            since = d.get("sinceRev")
+            if isinstance(since, int) and not isinstance(since, bool) and since == data_rev:
+                return {"unchanged": True, "dataRev": data_rev}
             events = [dict(r) for r in con.execute(
                 """SELECT id, title, event_date, event_time, note, color, created_by, created_by_id, visibility
                    FROM calendar_events ORDER BY event_date""")]
@@ -6971,23 +7784,11 @@ def _handle_action_core(action, d, ip=""):
             elif (d.get("role") or "") == "employee":
                 emp_name = (d.get("empName") or "").strip()
                 emp_id = d.get("empId")
-                visible = employee_visible_client_ids(con, emp_id, emp_name, tasks, queries)
-                # BDC staff: their own leads (added by them, or they're named as the BDC)
-                # show in full - payments, contact details, invite - exactly as the shared
-                # BDC login sees them, because working those leads is their job.
-                own_leads = set()
-                if (d.get("empRole") or "") == "TELECALLER" and emp_name:
-                    for r in con.execute("""SELECT DISTINCT client_id FROM history
-                                            WHERE stage='NEW' AND actor=?""", (emp_name,)):
-                        own_leads.add(r["client_id"])
-                    for r in con.execute("SELECT id FROM clients WHERE LOWER(TRIM(bdc))=LOWER(?)", (emp_name,)):
-                        own_leads.add(r["id"])
-                    visible |= own_leads
-                # Submission team: every paper waiting to be submitted, and the ones they submitted.
-                if (d.get("empRole") or "") == "JOURNAL_EMPLOYEE" and (d.get("empTeamType") or "") == "SUBMISSION":
-                    for r in con.execute("""SELECT id FROM clients WHERE stage IN ('SUBMISSION','JOURNAL_SUBMITTED')
-                                            OR submission_person=?""", (emp_name,)):
-                        visible.add(r["id"])
+                # Clients they're attached to, plus (BDC staff) their own leads in full and
+                # (Submission team) every paper waiting to be submitted. The same helper
+                # also guards documents, chat and tasks, so what an employee can open by id
+                # is exactly what their dashboard shows.
+                visible, own_leads = employee_client_scope(con, d, tasks, queries)
                 clients_out = [(c if c["id"] in own_leads else scrub_client_for_employee(c))
                                for c in clients_out if c["id"] in visible]
                 queries = [q for q in queries if q["client_id"] in visible]
@@ -7038,7 +7839,8 @@ def _handle_action_core(action, d, ip=""):
                     "services": {k: {"label": v["label"], "hasImplementation": v["hasImplementation"],
                                       "requiresWritingFee": v.get("requiresWritingFee", False),
                                       "amounts": v["amounts"]} for k, v in SERVICES.items()},
-                    "stageReminders": reminder_settings(con) if (d.get("role") or "") != "client" else None}
+                    "stageReminders": reminder_settings(con) if (d.get("role") or "") != "client" else None,
+                    "dataRev": data_rev}
 
         if action == "add_client":
             name = (d.get("name") or "").strip()
@@ -7608,6 +8410,15 @@ def _handle_action_core(action, d, ip=""):
             row = con.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
             if not row:
                 raise ApiError("That task no longer exists.")
+            if is_individual_employee(d):
+                # SECURITY: a team member may only start / hand in / annotate a task that is
+                # assigned to them - never retitle, reassign, re-date or approve anyone's.
+                if not task_assigned_to(row, (d.get("empName") or "").strip()):
+                    raise ApiError("You can only update tasks that are assigned to you.", 403)
+                if any(k in d for k in EMPLOYEE_TASK_LOCKED_FIELDS):
+                    raise ApiError("Only your Manager / TL can change a task's details.", 403)
+                if "status" in d and (d.get("status") or "").strip().upper() not in EMPLOYEE_TASK_STATUSES:
+                    raise ApiError("You can start a task or mark it done; your Manager / TL approves it.", 403)
             fields, vals = [], []
             simple_map = {"title": "title", "description": "description", "assignedTo": "assigned_to",
                           "startDate": "start_date", "finishDate": "finish_date", "notes": "notes"}
@@ -7631,6 +8442,16 @@ def _handle_action_core(action, d, ip=""):
                 actor_role = (d.get("role") or "").strip()
                 if status == "COMPLETED" and actor_role not in TASK_COMPLETION_ROLES:
                     raise ApiError("Only a Technical Manager/TL (technical tasks) or Journal Manager/TL (journal tasks) can approve a task as fully complete.")
+                if status == "COMPLETED" and actor_role in TASK_TEAM_TYPES:
+                    # Check both the stored type and any type being set in this same request.
+                    types_involved = {(row["task_type"] or "").upper()}
+                    if "taskType" in d:
+                        types_involved.add((d.get("taskType") or "").strip().upper())
+                    other_team = [t for t in types_involved
+                                  if t and t not in TASK_TEAM_TYPES[actor_role]]
+                    if other_team:
+                        raise ApiError("This is another team's task - only its own Manager / TL "
+                                       "(or Admin) can approve it as complete.", 403)
                 fields.append("status=?"); vals.append(status)
                 note_author = (d.get("actorName") or actor_role or "Someone").strip()
                 extra_note = (d.get("note") or "").strip()
@@ -8285,7 +9106,7 @@ def _handle_action_core(action, d, ip=""):
         if action == "submit_proposal":
             c = get_client(con, d.get("clientId") or "")
             require_stage(c, "PROPOSAL_ASSIGNED")
-            who = (d.get("empName") or "").strip() or (c["proposal_writer"] or "Writer")
+            who = (d.get("empName") or d.get("actorLabel") or "").strip() or (c["proposal_writer"] or "Writer")
             con.execute("UPDATE clients SET proposal_submitted_at=to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id=?",
                         (c["id"],))
             move_stage(con, c["id"], "PROPOSAL_SUBMITTED", who)
@@ -8971,7 +9792,7 @@ def _handle_action_core(action, d, ip=""):
         if action == "submit_writing_demo":
             c = get_client(con, d.get("clientId") or "")
             require_stage(c, "PAPERWRITER_ASSIGNED")
-            who = (d.get("empName") or "").strip() or (c["assigned_writers"] or "Paper Writer")
+            who = (d.get("empName") or d.get("actorLabel") or "").strip() or (c["assigned_writers"] or "Paper Writer")
             con.execute("UPDATE clients SET demo_completed_date=? WHERE id=?",
                         (d.get("demoDate") or date.today().isoformat(), c["id"]))
             first_writer = (c["assigned_writers"] or "").split(",")[0].strip()
@@ -9018,7 +9839,7 @@ def _handle_action_core(action, d, ip=""):
         if action == "writer_resubmit":
             c = get_client(con, d.get("clientId") or "")
             require_stage(c, "WRITER_FIXING")
-            who = (d.get("empName") or "").strip() or (c["assigned_writers"] or "Paper Writer")
+            who = (d.get("empName") or d.get("actorLabel") or "").strip() or (c["assigned_writers"] or "Paper Writer")
             dest = {"COORDINATOR": "COORDINATOR_REVIEW", "TECHTL": "TECHTL_REVIEW",
                     "TECHMGR": "TECHMGR_REVIEW"}.get(c["review_level"] or "", "COORDINATOR_REVIEW")
             if dest == "COORDINATOR_REVIEW" and not (c["coordinator_name"] or "").strip():
@@ -9269,7 +10090,7 @@ def _handle_action_core(action, d, ip=""):
             note = (d.get("note") or "").strip()
             if not note:
                 raise ApiError("Add a note describing what the writer needs to fix.")
-            actor = c["proofread_coordinator"] or "Proofreading Coordinator"
+            actor = (d.get("actorLabel") or "").strip() or c["proofread_coordinator"] or "Proofreading Coordinator"
             fname = _save_proofread_doc(con, c, d, actor, "Proofreading correction", required=True)
             con.execute("UPDATE clients SET proofread_rounds=proofread_rounds+1 WHERE id=?", (c["id"],))
             move_stage(con, c["id"], "PROOFREAD_CORRECTION", actor, f"{note} (Attached: {fname})")
@@ -9279,7 +10100,7 @@ def _handle_action_core(action, d, ip=""):
         if action == "writer_resubmit_proofread":
             c = get_client(con, d.get("clientId") or "")
             require_stage(c, "PROOFREAD_CORRECTION")
-            who = (d.get("empName") or "").strip() or (c["assigned_writers"] or "Paper Writer")
+            who = (d.get("empName") or d.get("actorLabel") or "").strip() or (c["assigned_writers"] or "Paper Writer")
             move_stage(con, c["id"], "PROOFREAD_RECHECK", who, d.get("note") or "")
             con.commit()
             return {"ok": True}
@@ -9291,7 +10112,7 @@ def _handle_action_core(action, d, ip=""):
             if c["stage"] not in ("PROOFREADING", "PROOFREAD_RECHECK"):
                 require_stage(c, "PROOFREAD_RECHECK")
             note = (d.get("note") or "").strip()
-            actor = c["proofread_coordinator"] or (d.get("empName") or "").strip() or "Proofreading team"
+            actor = (d.get("empName") or d.get("actorLabel") or "").strip() or c["proofread_coordinator"] or "Proofreading team"
             if bool(d.get("approve")):
                 fname = _save_proofread_doc(con, c, d, actor, "Proofread (approved)", required=False)
                 move_stage(con, c["id"], "JOURNAL_MANAGER_FORMATTING", actor,
@@ -9349,7 +10170,7 @@ def _handle_action_core(action, d, ip=""):
         if action == "complete_formatting":
             c = get_client(con, d.get("clientId") or "")
             require_stage(c, "FORMATTING_IN_PROGRESS")
-            move_stage(con, c["id"], "SUBMISSION", c["assigned_formatters"] or "Formatting team")
+            move_stage(con, c["id"], "SUBMISSION", (d.get("actorLabel") or "").strip() or c["assigned_formatters"] or "Formatting team")
             con.commit()
             return {"ok": True}
 
@@ -9392,7 +10213,7 @@ def _handle_action_core(action, d, ip=""):
             require_submission_team(d)
             c = get_client(con, d.get("clientId") or "")
             require_stage(c, "SUBMISSION")
-            who = (d.get("empName") or "").strip() or "Submission Team"
+            who = (d.get("empName") or d.get("actorLabel") or "").strip() or "Submission Team"
             con.execute("UPDATE clients SET submission_person=?, journal_status='SUBMITTED' WHERE id=?",
                         (who, c["id"]))
             move_stage(con, c["id"], "JOURNAL_SUBMITTED", who)
@@ -9412,11 +10233,11 @@ def _handle_action_core(action, d, ip=""):
                 raise ApiError("Unknown journal status.")
             con.execute("UPDATE clients SET journal_status=? WHERE id=?", (status, c["id"]))
             if status in ("ACCEPTED", "PUBLISHED"):
-                move_stage(con, c["id"], "COMPLETED", (d.get("empName") or "").strip() or "Submission Team",
+                move_stage(con, c["id"], "COMPLETED", (d.get("empName") or d.get("actorLabel") or "").strip() or "Submission Team",
                            f"Journal status: {status}")
             else:
                 con.execute("INSERT INTO history (client_id, stage, actor, note) VALUES (?,?,?,?)",
-                            (c["id"], c["stage"], (d.get("empName") or "").strip() or "Submission Team",
+                            (c["id"], c["stage"], (d.get("empName") or d.get("actorLabel") or "").strip() or "Submission Team",
                              f"Journal status: {status}"))
             con.commit()
             return {"ok": True}
@@ -9433,7 +10254,7 @@ def _handle_action_core(action, d, ip=""):
             status = (d.get("status") or "").strip().upper()
             if status not in JOURNAL_STATUSES:
                 raise ApiError("Unknown journal status.")
-            who = (d.get("empName") or "").strip() or "Submission Team"
+            who = (d.get("empName") or d.get("actorLabel") or "").strip() or "Submission Team"
             _sync_journal_targets(con, c, "SUBMITTED", who)
             item_id = d.get("id")
             name = (d.get("name") or "").strip()
@@ -9597,8 +10418,8 @@ def _handle_action_core(action, d, ip=""):
             if not password:
                 password = secrets.token_urlsafe(9)
                 generated_password = password
-            elif len(password) < MIN_PASSWORD_LENGTH:
-                raise ApiError("The password must be at least %d characters." % MIN_PASSWORD_LENGTH)
+            else:
+                require_strong_password(password)
             joining_date = (d.get("joiningDate") or "").strip()
             date_of_birth = (d.get("dateOfBirth") or "").strip()
             manual_uid = (d.get("empUid") or "").strip()
@@ -9609,9 +10430,14 @@ def _handle_action_core(action, d, ip=""):
             aadhaar = _clean_aadhaar(d.get("aadhaar"))
             if not name:
                 raise ApiError("Name is required.")
+            if person_name_problem(name):
+                raise ApiError(person_name_problem(name))
             if role not in ("PROGRAMMER", "PAPER_WRITER", "JOURNAL_EMPLOYEE", "TELECALLER"):
                 raise ApiError("Unknown team role.")
             require_team_scope(actor_role, role)
+            clash = employee_name_taken(con, name)
+            if clash:
+                raise ApiError(employee_name_taken_msg(clash))
             if email and not EMAIL_RE.match(email):
                 raise ApiError("That Mail ID doesn't look like a valid email address.")
             if phone and not re.match(r"^\d{10}$", phone):
@@ -9661,7 +10487,7 @@ def _handle_action_core(action, d, ip=""):
                             joining_date, date_of_birth, branch, department, phone, designation, aadhaar)
                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (name, role, team_type, email, uid, hash_password(password), is_coordinator, coordinator_id,
-                         joining_date, date_of_birth, branch, department, phone, designation, aadhaar))
+                         joining_date, date_of_birth, branch, department, phone, designation, store_aadhaar(aadhaar)))
             con.commit()
             # The plain-text password is returned exactly once, at creation time, so it can be
             # shown/shared with the new team member — it is never stored or retrievable again.
@@ -9690,12 +10516,18 @@ def _handle_action_core(action, d, ip=""):
                     fields.append(f"{col}=?"); vals.append(val)
             if "name" in d and not (d.get("name") or "").strip():
                 raise ApiError("Name cannot be empty.")
+            if "name" in d and person_name_problem((d.get("name") or "").strip()):
+                raise ApiError(person_name_problem((d.get("name") or "").strip()))
+            if "name" in d:
+                clash = employee_name_taken(con, d.get("name"), exclude_id=e["id"])
+                if clash:
+                    raise ApiError(employee_name_taken_msg(clash))
             # Aadhaar: blank = keep the stored one (the UI only ever shows it masked).
             new_aadhaar = _clean_aadhaar(d.get("aadhaar"))
             if new_aadhaar:
                 if not re.match(r"^\d{12}$", new_aadhaar):
                     raise ApiError("Enter a 12-digit Aadhaar number.")
-                fields.append("aadhaar=?"); vals.append(new_aadhaar)
+                fields.append("aadhaar=?"); vals.append(store_aadhaar(new_aadhaar))
             if "phone" in d and (d.get("phone") or "").strip() and not re.match(r"^\d{10}$", (d.get("phone") or "").strip()):
                 raise ApiError("Enter a 10-digit phone number.")
             final_phone = (d.get("phone") or "").strip() if "phone" in d else (e["phone"] or "")
@@ -9760,6 +10592,9 @@ def _handle_action_core(action, d, ip=""):
             e = con.execute("SELECT * FROM employees WHERE id=? AND deleted_at IS NOT NULL", (emp_id,)).fetchone()
             if not e:
                 raise ApiError("Employee not found in the deleted list.")
+            clash = employee_name_taken(con, e["name"], exclude_id=e["id"])
+            if clash:
+                raise ApiError("Can't restore %s: %s" % (e["name"], employee_name_taken_msg(clash)))
             con.execute("UPDATE employees SET deleted_at=NULL WHERE id=?", (emp_id,))
             con.commit()
             return {"ok": True}
@@ -9948,8 +10783,7 @@ def _handle_action_core(action, d, ip=""):
             current_pwd = (d.get("currentPassword") or "").strip()
             if not current_pwd:
                 raise ApiError("Enter your current password.")
-            if len(new_pwd) < MIN_PASSWORD_LENGTH:
-                raise ApiError("Choose a password at least %d characters long." % MIN_PASSWORD_LENGTH)
+            require_strong_password(new_pwd)
             emp_id = d.get("empId")
             actor_role = (d.get("role") or "").strip()
             if emp_id:
@@ -9961,6 +10795,15 @@ def _handle_action_core(action, d, ip=""):
                 if not verify_password(current_pwd, row["password"]):
                     raise ApiError("Current password is incorrect.")
                 con.execute("UPDATE employees SET password=? WHERE id=?", (hash_password(new_pwd), emp_id))
+                revoke_sessions(con, keep_token=d.get("_session_token"), emp_id=row["id"])
+            elif actor_role == "client":
+                # Client portal: their own portal password (this branch was missing, so the
+                # portal's "change password" always answered "Unknown role").
+                c = get_client(con, d.get("clientId") or "")
+                if not verify_password(current_pwd, c["client_password"] or ""):
+                    raise ApiError("Current password is incorrect.")
+                con.execute("UPDATE clients SET client_password=? WHERE id=?", (hash_password(new_pwd), c["id"]))
+                revoke_sessions(con, keep_token=d.get("_session_token"), client_id=c["id"])
             else:
                 if actor_role == "employee":
                     raise ApiError("Log in as yourself (Employee Login) to change your own password.")
@@ -9970,6 +10813,7 @@ def _handle_action_core(action, d, ip=""):
                 if not verify_password(current_pwd, row["password"]):
                     raise ApiError("Current password is incorrect.")
                 con.execute("UPDATE users SET password=? WHERE role=?", (hash_password(new_pwd), actor_role))
+                revoke_sessions(con, keep_token=d.get("_session_token"), role=actor_role)
             con.commit()
             return {"ok": True}
 
@@ -9978,12 +10822,12 @@ def _handle_action_core(action, d, ip=""):
                 raise ApiError("Only the Super Admin / MD Admin can reset another employee's password.")
             eid = int(d.get("id") or 0)
             newpwd = (d.get("password") or "").strip()
-            if len(newpwd) < MIN_PASSWORD_LENGTH:
-                raise ApiError("Choose a password at least %d characters long." % MIN_PASSWORD_LENGTH)
+            require_strong_password(newpwd)
             e = con.execute("SELECT id FROM employees WHERE id=? AND active=1", (eid,)).fetchone()
             if not e:
                 raise ApiError("Employee not found.")
             con.execute("UPDATE employees SET password=? WHERE id=?", (hash_password(newpwd), eid))
+            revoke_sessions(con, emp_id=eid)
             con.commit()
             return {"ok": True}
 
@@ -9995,20 +10839,23 @@ def _handle_action_core(action, d, ip=""):
             if (d.get("role") or "").strip() not in ADMIN_ROLES:
                 raise ApiError("Only the Super Admin / MD Admin can set another login's password.")
             new_pwd = (d.get("newPassword") or "").strip()
-            if len(new_pwd) < MIN_PASSWORD_LENGTH:
-                raise ApiError("Choose a password at least %d characters long." % MIN_PASSWORD_LENGTH)
+            require_strong_password(new_pwd)
             emp_id = d.get("empId")
             if emp_id:
                 row = con.execute("SELECT id FROM employees WHERE id=?", (emp_id,)).fetchone()
                 if not row:
                     raise ApiError("Unknown employee.")
                 con.execute("UPDATE employees SET password=? WHERE id=?", (hash_password(new_pwd), emp_id))
+                revoke_sessions(con, emp_id=row["id"])
             else:
                 target_role = (d.get("targetRole") or "").strip()
                 row = con.execute("SELECT role FROM users WHERE role=?", (target_role,)).fetchone()
                 if not row:
                     raise ApiError("Unknown role.")
                 con.execute("UPDATE users SET password=? WHERE role=?", (hash_password(new_pwd), target_role))
+                # Everyone signed in with that shared login is signed out (the admin's own
+                # tab stays signed in when they change their own role's password).
+                revoke_sessions(con, keep_token=d.get("_session_token"), role=target_role)
             con.commit()
             return {"ok": True}
 
@@ -10090,8 +10937,13 @@ def _handle_action_core(action, d, ip=""):
             demo_time = (d.get("demoTime") or "").strip()
             note = (d.get("note") or "").strip()
             # Whoever it's assigned to can be picked explicitly; otherwise default to whoever
-            # is currently doing that side of the client's work.
-            emp_name = (d.get("empName") or "").strip()
+            # is currently doing that side of the client's work. (The picked person arrives as
+            # _target_emp_name - empName is reserved for the signed-in employee.)
+            emp_name = (d.get("_target_emp_name") or "").strip()
+            if emp_name and not con.execute(
+                    "SELECT 1 FROM employees WHERE name=? AND active=1 AND deleted_at IS NULL",
+                    (emp_name,)).fetchone():
+                raise ApiError("Pick an active team member for the demo.")
             if not emp_name:
                 pool = names(c["assigned_programmers"]) if demo_type == "code" else names(c["assigned_writers"])
                 emp_name = pool[0] if pool else ""
@@ -10224,7 +11076,8 @@ def _handle_action_core(action, d, ip=""):
         if action == "chat_typing":
             c = get_client(con, d.get("clientId") or "")
             thread_with = (d.get("threadWith") or "").strip()
-            sender_type = d.get("senderType") or ""
+            # Which side is typing comes from the session, never the request (review fix #19).
+            sender_type = "client" if (d.get("role") or "") == "client" else "staff"
             if not thread_with or sender_type not in ("client", "staff"):
                 raise ApiError("Missing chat info.")
             _typing_touch(_TYPING_CHAT, (c["id"], thread_with, sender_type))
@@ -10233,7 +11086,10 @@ def _handle_action_core(action, d, ip=""):
         if action == "send_message":
             c = get_client(con, d.get("clientId") or "")
             thread_with = (d.get("threadWith") or "").strip()
-            sender_type = d.get("senderType") or ""
+            # SECURITY (review fix #19): the side a message comes from is decided by the
+            # session. It used to be taken from the request, so staff could post a message
+            # that showed up as sent by the client.
+            sender_type = "client" if (d.get("role") or "") == "client" else "staff"
             sender_name = (d.get("senderName") or "").strip()
             body = (d.get("body") or "").strip()
             file_name = sanitize_upload_filename(d.get("fileName"))
@@ -10263,7 +11119,9 @@ def _handle_action_core(action, d, ip=""):
         if action == "get_thread":
             c = get_client(con, d.get("clientId") or "")
             thread_with = (d.get("threadWith") or "").strip()
-            viewer = d.get("viewer") or ""
+            # The reader's side comes from the session (review fix #19): staff could pass
+            # viewer="client" and mark the client's unread messages as read.
+            viewer = "client" if (d.get("role") or "") == "client" else "staff"
             viewer_key = (d.get("viewerKey") or "").strip()
             if viewer not in ("client", "staff"):
                 raise ApiError("Unknown viewer.")
@@ -10327,6 +11185,15 @@ def _handle_action_core(action, d, ip=""):
             return {"ok": True, "to": to}
 
         # ----- Admin: is email actually working? (Settings -> Email sending check) -----
+        if action == "login_as_log":
+            # Admin: everything done in "Log in as" sessions, newest first.
+            rows = con.execute("""SELECT id, emp_id, emp_name, opened_by, action, client_id, detail, ok, ip, created_at
+                                  FROM login_as_log ORDER BY id DESC LIMIT 500""").fetchall()
+            return {"ok": True, "entries": [{
+                "id": r["id"], "empName": r["emp_name"], "openedBy": r["opened_by"], "action": r["action"],
+                "clientId": r["client_id"], "detail": r["detail"], "ok": bool(r["ok"]), "ip": r["ip"],
+                "at": r["created_at"]} for r in rows]}
+
         if action == "mail_status":
             with _MAIL_LOG_LOCK:
                 log = list(reversed(_MAIL_LOG))
@@ -10912,6 +11779,9 @@ def _handle_action_core(action, d, ip=""):
                     "SELECT * FROM clients WHERE reg_date BETWEEN ? AND ?", (start_date, end_date)).fetchall()
             else:
                 client_rows = con.execute("SELECT * FROM clients").fetchall()
+            # Pending portal setup codes are credentials: never written into a backup file
+            # (after a restore, staff simply send a new invitation).
+            client_rows = [dict(r, invite_token="") for r in client_rows]
             client_ids = [r["id"] for r in client_rows]
 
             def rows_for(table, id_col="client_id"):
@@ -11326,6 +12196,23 @@ def _import_backup_rows(con, table, rows):
 
 
 # ---------------------------------------------------------- HTTP server
+_INDEX_CACHE = {}
+
+
+def _index_html():
+    """(raw bytes, ETag, gzipped bytes) of index.html, re-read when the file changes."""
+    path = os.path.join(ROOT, "index.html")
+    mtime = os.path.getmtime(path)
+    hit = _INDEX_CACHE.get("v")
+    if not hit or hit[0] != mtime:
+        with open(path, "rb") as f:
+            raw = f.read()
+        etag = '"%s"' % hashlib.sha256(raw).hexdigest()[:32]
+        hit = (mtime, raw, etag, gzip.compress(raw, compresslevel=6))
+        _INDEX_CACHE["v"] = hit
+    return hit[1], hit[2], hit[3]
+
+
 class Handler(BaseHTTPRequestHandler):
     # Body cap comes from MAX_BODY_BYTES (env), above the base64 upload caps.
 
@@ -11352,9 +12239,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy",
                           "default-src 'self'; "
                           "script-src 'self' 'unsafe-inline'; "
-                          "style-src 'self' 'unsafe-inline'; "
+                          # The page loads its Inter / JetBrains Mono fonts from Google Fonts;
+                          # the old policy blocked them (review fix #15).
+                          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                           "img-src 'self' data:; "
-                          "font-src 'self' data:; "
+                          "font-src 'self' data: https://fonts.gstatic.com; "
                           "connect-src 'self'; "
                           "frame-ancestors 'none'; "
                           "base-uri 'self'; "
@@ -11399,11 +12288,21 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return origin_host == host
 
+    def _gzip_ok(self):
+        return "gzip" in (self.headers.get("Accept-Encoding") or "").lower()
+
     def _json(self, obj, code=200, extra_headers=None):
         try:
             body = json.dumps(obj).encode("utf-8")
+            gz = len(body) > 1400 and self._gzip_ok()
+            if gz:
+                # PERFORMANCE (review fix #5): dashboard data compresses ~5-10x.
+                body = gzip.compress(body, compresslevel=5)
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            if gz:
+                self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self._security_headers()
@@ -11451,8 +12350,13 @@ class Handler(BaseHTTPRequestHandler):
         if (self.headers.get("X-Requested-With") or "") != "matiz-app":
             return self._json({"error": "Request blocked: missing application header."}, 403)
 
-        # ----- general abuse/rate limiting, per IP -----
-        if _rate_limited(ip, "api", limit=180, window_seconds=60):
+        # ----- general abuse/rate limiting: per signed-in tab, plus a much higher cap per
+        #       IP (an office shares one IP; the old 180/min per IP was used up by three
+        #       people with a chat open). -----
+        tab_key = (self.headers.get(TAB_TOKEN_HEADER) or "").strip()
+        if tab_key and _rate_limited(hash_session_token(tab_key), "api_tab", limit=API_RATE_PER_TAB, window_seconds=60):
+            return self._json({"error": "Too many requests. Please slow down and try again shortly."}, 429)
+        if _rate_limited(ip, "api", limit=API_RATE_PER_IP, window_seconds=60):
             return self._json({"error": "Too many requests. Please slow down and try again shortly."}, 429)
 
         data = {}
@@ -11489,6 +12393,7 @@ class Handler(BaseHTTPRequestHandler):
         # Always overwritten here, so nothing in the request body can supply them.
         data["_session_token"] = token
         data["_browser_key"] = browser_key
+        data["_request_host"] = (self.headers.get("Host") or "").strip()
 
         # ----- AUTHORIZATION: deny-by-default role check before anything runs.
         #       Unmapped actions are rejected, so a new handler added without a
@@ -11506,6 +12411,18 @@ class Handler(BaseHTTPRequestHandler):
             expected = session["csrf"] or ""
             if not expected or not hmac.compare_digest(supplied, expected):
                 return self._json({"error": "Your session has expired. Please log in again."}, 401)
+
+        # ----- "Log in as" sessions: no account-takeover actions, and an audit trail. -----
+        impersonator = (session.get("impersonated_by") or "") if session else ""
+        if impersonator and action in IMPERSONATION_BLOCKED_ACTIONS:
+            con4 = db()
+            try:
+                log_login_as(con4, session, action, data, False, ip, "blocked in a Log in as session")
+            finally:
+                con4.close()
+            return self._json({"error": "You're signed in as %s via \"Log in as\". Their password, "
+                               "e-mail and profile can only be changed by %s themselves."
+                               % (session["emp_name"] or "this team member", session["emp_name"] or "them")}, 403)
 
         # Bind the principal to this request thread so get_client() can enforce
         # object-level ownership centrally.
@@ -11533,7 +12450,18 @@ class Handler(BaseHTTPRequestHandler):
                 data["empName"] = session["emp_name"]
                 data["empRole"] = session["emp_role"]
                 data["empTeamType"] = session["emp_team_type"] or ""
-            elif session["kind"] == "client":
+                data["_target_emp_name"] = ""
+            else:
+                # SECURITY (review fix #3): handlers record "who did it" from empName, but it
+                # used to be taken from the request body for every non-employee login, so a
+                # shared department login could write any person's name into the history.
+                # Only an individually-signed-in employee has a name; for everyone else the
+                # session label (actorLabel, set below) is used instead. schedule_demo is
+                # the one action where a manager names a *target* employee, so that value
+                # is kept under its own key.
+                data["_target_emp_name"] = str(data.get("empName") or "").strip()
+                data["empName"] = ""
+            if session["kind"] == "client":
                 # A client may legitimately act on any record in their own CL-ID
                 # family (the "same client, another service" grouping), so rather
                 # than blindly forcing their login record — which would silently
@@ -11572,10 +12500,15 @@ class Handler(BaseHTTPRequestHandler):
 
         set_cookie = None
         clear_cookie = False
+        audit = bool(impersonator) and action not in IMPERSONATION_UNLOGGED_ACTIONS
+        audit_ok, audit_detail = False, ""
         try:
             result = handle_action(action, data, ip=ip)
+            audit_ok = True
+            if action not in READ_ONLY_ACTIONS:
+                bump_data_rev()
             if isinstance(result, dict):
-                if new_browser_key and result.get("sessionToken"):
+                if new_browser_key and (result.get("sessionToken") or result.get("otpTicket")):
                     set_cookie = new_browser_key
                 if result.pop("_clear_cookie", False):
                     clear_cookie = True
@@ -11586,6 +12519,7 @@ class Handler(BaseHTTPRequestHandler):
                 extra.append(("Set-Cookie", self._cookie_header("", clear=True)))
             self._json(result, extra_headers=extra or None)
         except ApiError as e:
+            audit_detail = e.msg
             self._json({"error": e.msg}, e.code)
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             # Client disconnected while handle_action() was still running — there's no
@@ -11604,6 +12538,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "Error 500 \u2013 Internal Server Error."}, 500)
         finally:
             set_principal(None)
+            if audit:
+                con5 = db()
+                try:
+                    log_login_as(con5, session, action, data, audit_ok, ip, audit_detail)
+                finally:
+                    con5.close()
 
     def _cors_headers_if_allowed(self):
         origin = self.headers.get("Origin")
@@ -11628,9 +12568,19 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/health":
             # Render health check. Deliberately says nothing about versions,
-            # configuration or database contents.
-            body = b'{"status": "ok"}'
-            self.send_response(200)
+            # configuration or database contents - but it does check that the database
+            # answers (review fix #18), so Render restarts or alerts instead of reporting
+            # a healthy app that can't load any data.
+            body, code = b'{"status": "ok"}', 200
+            try:
+                con = db()
+                try:
+                    con.execute("SELECT 1").fetchone()
+                finally:
+                    con.close()
+            except Exception:
+                body, code = b'{"status": "database unavailable"}', 503
+            self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
@@ -11642,13 +12592,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._api()
         if path in ("/", "/index.html"):
             try:
-                with open(os.path.join(ROOT, "index.html"), "rb") as f:
-                    body = f.read()
+                # PERFORMANCE (review fix #5): the 1.15 MB page used to be re-sent uncompressed
+                # on every load. It is now gzipped (~285 KB) and revalidated with an ETag, so
+                # an unchanged page costs a 304 with no body.
+                body, etag, body_gz = _index_html()
+                if (self.headers.get("If-None-Match") or "").strip() == etag:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "no-cache")
+                    self._security_headers()
+                    self.end_headers()
+                    return
+                gz = self._gzip_ok()
+                if gz:
+                    body = body_gz
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                if gz:
+                    self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-                self.send_header("Pragma", "no-cache")
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "no-cache")
                 self._security_headers()
                 self.end_headers()
                 self.wfile.write(body)
@@ -11798,26 +12763,262 @@ def app(environ, start_response):
 # Under a WSGI server (gunicorn) there is no __main__ block, so the schema
 # creation / column migrations / password hashing would never run and every
 # login would fail against an unmigrated database. Initialise on import.
+# PERFORMANCE (review fix #5): the tables every dashboard refresh and chat poll read by
+# client had no index on client_id, so each refresh scanned them in full.
+_REVIEW_INDEXES = (
+    ("idx_history_client", "history (client_id)"),
+    ("idx_messages_client_thread", "messages (client_id, thread_with)"),
+    ("idx_client_documents_client", "client_documents (client_id)"),
+    ("idx_tasks_client", "tasks (client_id)"),
+    ("idx_calls_client", "calls (client_id)"),
+    ("idx_client_queries_client", "client_queries (client_id)"),
+    ("idx_work_updates_client", "work_updates (client_id)"),
+    ("idx_service_items_client", "service_items (client_id)"),
+    ("idx_client_installments_client", "client_installments (client_id)"),
+    ("idx_journal_targets_client", "journal_targets (client_id)"),
+    ("idx_journal_revisions_client", "journal_revisions (client_id)"),
+    ("idx_client_notes_v2_client", "client_notes_v2 (client_id)"),
+    ("idx_client_referrals_client", "client_referrals (client_id)"),
+    ("idx_task_comments_task", "task_comments (task_id)"),
+    ("idx_task_stages_task", "task_stages (task_id)"),
+    ("idx_dm_messages_pair", "dm_messages (p1, p2)"),
+    ("idx_sessions_emp", "sessions (emp_id)"),
+    ("idx_sessions_client", "sessions (client_id)"),
+)
+
+
+# =====================================================================
+# TWO-STEP SIGN-IN (TOTP, RFC 6238) - standard library only. Works with Google
+# Authenticator, Microsoft Authenticator, Authy etc. A shared department login can
+# be added to the phones of everyone who uses it (same key).
+# =====================================================================
+TOTP_ISSUER = "iMatiz PM"
+OTP_TICKET_SECONDS = 300
+OTP_TICKET_TRIES = 5
+
+
+def _seal_key():
+    return hmac.new(SECRET_KEY.encode("utf-8"), b"seal-v1", hashlib.sha256).digest()
+
+
+def seal(text):
+    """Encrypt a short secret for storage (HMAC-SHA256 keystream with a random nonce,
+    plus an HMAC tag). Keyed from SECRET_KEY, so a database copy alone doesn't reveal it."""
+    data = (text or "").encode("utf-8")
+    nonce = secrets.token_bytes(16)
+    stream = b"".join(hmac.new(_seal_key(), nonce + struct.pack(">I", i), hashlib.sha256).digest()
+                      for i in range(len(data) // 32 + 1))
+    ct = bytes(a ^ b for a, b in zip(data, stream))
+    tag = hmac.new(_seal_key(), b"tag" + nonce + ct, hashlib.sha256).digest()[:16]
+    return "s1$" + base64.urlsafe_b64encode(nonce + tag + ct).decode("ascii")
+
+
+def unseal(blob):
+    if not blob or not blob.startswith("s1$"):
+        return ""
+    try:
+        raw = base64.urlsafe_b64decode(blob[3:].encode("ascii"))
+    except (ValueError, TypeError):
+        return ""
+    nonce, tag, ct = raw[:16], raw[16:32], raw[32:]
+    if not hmac.compare_digest(tag, hmac.new(_seal_key(), b"tag" + nonce + ct, hashlib.sha256).digest()[:16]):
+        return ""       # SECRET_KEY changed or data tampered with
+    stream = b"".join(hmac.new(_seal_key(), nonce + struct.pack(">I", i), hashlib.sha256).digest()
+                      for i in range(len(ct) // 32 + 1))
+    return bytes(a ^ b for a, b in zip(ct, stream)).decode("utf-8", "replace")
+
+
+def new_totp_secret():
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def totp_code(secret_b32, step):
+    key = base64.b32decode(secret_b32 + "=" * (-len(secret_b32) % 8), casefold=True)
+    h = hmac.new(key, struct.pack(">Q", step), hashlib.sha1).digest()
+    o = h[-1] & 0x0F
+    return "%06d" % ((struct.unpack(">I", h[o:o + 4])[0] & 0x7FFFFFFF) % 1000000)
+
+
+def totp_check(secret_b32, code, last_step=0):
+    """The time step the code belongs to (now +/- 30 s), or None. A step at or before
+    last_step is refused, so a code can't be used twice."""
+    code = re.sub(r"\s", "", str(code or ""))
+    if not secret_b32 or not re.match(r"^\d{6}$", code):
+        return None
+    now = int(time.time() // 30)
+    for step in (now - 1, now, now + 1):
+        if step > (last_step or 0) and hmac.compare_digest(totp_code(secret_b32, step), code):
+            return step
+    return None
+
+
+def totp_uri(secret_b32, role):
+    label = urllib.parse.quote("%s:%s" % (TOTP_ISSUER, STAFF_ROLE_LABELS.get(role, role)))
+    return "otpauth://totp/%s?secret=%s&issuer=%s&algorithm=SHA1&digits=6&period=30" % (
+        label, secret_b32, urllib.parse.quote(TOTP_ISSUER))
+
+
+def role_requires_2fa(role):
+    if REQUIRE_2FA == "off":
+        return False
+    if REQUIRE_2FA == "all":
+        return True
+    return role in ADMIN_ROLES
+
+
+def start_otp_ticket(con, role, u, browser_key, ip):
+    """Password was right; hand out a 5-minute ticket for the code step instead of a session.
+    A login that hasn't set up its authenticator yet (and must) gets a new key to set up."""
+    if not browser_key:
+        raise ApiError("Your browser blocked the sign-in cookie. Please allow cookies for this site and try again.")
+    setup = not u["totp_enabled"]
+    secret = new_totp_secret() if setup else ""
+    ticket = secrets.token_urlsafe(32)
+    con.execute("DELETE FROM login_otp_tickets WHERE expires_at < ?", (time.time(),))
+    con.execute("""INSERT INTO login_otp_tickets (ticket, role, browser_key, setup, secret, tries, expires_at, ip)
+                   VALUES (?,?,?,?,?,0,?,?)""",
+                (hash_session_token(ticket), role, hash_session_token(browser_key), 1 if setup else 0,
+                 seal(secret) if setup else "", time.time() + OTP_TICKET_SECONDS, ip or ""))
+    con.commit()
+    out = {"ok": True, "otpRequired": True, "otpTicket": ticket, "otpSetup": setup}
+    if setup:
+        out.update({"otpSecret": secret, "otpUri": totp_uri(secret, role)})
+    return out
+
+
+def init_review_fixes():
+    """Schema pieces added by the review fixes. Idempotent, runs at every start."""
+    con = db()
+    try:
+        for name, target in _REVIEW_INDEXES:
+            con.execute("CREATE INDEX IF NOT EXISTS %s ON %s" % (name, target))
+        con.execute("""CREATE TABLE IF NOT EXISTS app_state (
+                           id INTEGER PRIMARY KEY CHECK (id = 1),
+                           data_rev BIGINT NOT NULL DEFAULT 1)""")
+        con.execute("INSERT INTO app_state (id, data_rev) VALUES (1, 1) ON CONFLICT (id) DO NOTHING")
+        for col, decl in (("totp_secret", "TEXT DEFAULT ''"), ("totp_pending", "TEXT DEFAULT ''"),
+                          ("totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
+                          ("totp_last_step", "BIGINT NOT NULL DEFAULT 0")):
+            con.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS %s %s" % (col, decl))
+        con.execute("""CREATE TABLE IF NOT EXISTS mail_outbox (
+                           id SERIAL PRIMARY KEY, payload TEXT NOT NULL,
+                           tries INTEGER NOT NULL DEFAULT 0, next_at DOUBLE PRECISION NOT NULL,
+                           last_error TEXT DEFAULT '', created_at TEXT DEFAULT (%s))""" % _NOW_SQL)
+        con.execute("""CREATE TABLE IF NOT EXISTS login_otp_tickets (
+                           ticket TEXT PRIMARY KEY, role TEXT NOT NULL, browser_key TEXT NOT NULL,
+                           setup INTEGER NOT NULL DEFAULT 0, secret TEXT DEFAULT '',
+                           tries INTEGER NOT NULL DEFAULT 0, expires_at DOUBLE PRECISION NOT NULL,
+                           ip TEXT DEFAULT '')""")
+        for r in RESET_2FA_ROLE:
+            con.execute("UPDATE users SET totp_enabled=0, totp_secret='', totp_pending='', totp_last_step=0 "
+                        "WHERE role=?", (r,))
+            print("[2fa] two-step sign-in reset for %s (RESET_2FA_ROLE) - remove that setting now." % r,
+                  file=sys.stderr, flush=True)
+        # Setup codes stored in plain text by older versions -> keyed hash.
+        for r in con.execute("SELECT id, invite_token FROM clients WHERE invite_token<>'' "
+                             "AND invite_token NOT LIKE 'ih1$%'").fetchall():
+            con.execute("UPDATE clients SET invite_token=? WHERE id=?", (invite_hash(r["invite_token"]), r["id"]))
+        # Aadhaar numbers stored in plain text by older versions -> keyed hash + last 4.
+        for r in con.execute("SELECT id, aadhaar FROM employees WHERE aadhaar ~ '^[0-9]{12}$'").fetchall():
+            con.execute("UPDATE employees SET aadhaar=? WHERE id=?", (store_aadhaar(r["aadhaar"]), r["id"]))
+        con.commit()
+    finally:
+        con.close()
+
+
+# Actions that never change what bootstrap returns. Everything else moves the data
+# revision on, so the 12-second background refresh knows to reload. (Missing an action
+# here only costs an extra reload; wrongly listing a writing action would leave
+# dashboards stale until the 2-minute full reload, so this list is kept to pure reads.)
+READ_ONLY_ACTIONS = frozenset({
+    "bootstrap", "session", "login", "login_captcha", "logout", "chat_typing", "dm_typing",
+    "dm_inbox", "dm_directory", "ai_reminders_poll", "ai_reminder_list", "alert_tone_get",
+    "get_my_profile", "get_member_profile", "help_chat", "get_client_document", "get_thread",
+    "dm_thread", "validation_list", "validation_get_file", "task_handoff_file", "mail_status",
+    "login_as_log", "admin_export_data", "admin_directory", "admin_import_summary",
+    "list_deleted_employees", "call_team_directory", "tm_import_template", "stage_reminders_poll",
+    "stage_reminders_overview", "call_poll", "login_otp", "otp_status", "otp_setup_start",
+    "otp_setup_confirm", "otp_disable", "admin_reset_otp",
+})
+
+
+def current_data_rev(con):
+    r = con.execute("SELECT data_rev FROM app_state WHERE id=1").fetchone()
+    return int(r["data_rev"]) if r else 0
+
+
+def bump_data_rev():
+    con = db()
+    try:
+        con.execute("UPDATE app_state SET data_rev = data_rev + 1 WHERE id=1")
+        con.commit()
+    except Exception as e:          # never let bookkeeping break the request
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        print("[data-rev] could not bump:", repr(e), file=sys.stderr)
+    finally:
+        con.close()
+
+
+def warn_duplicate_employee_names():
+    """Names must be unique (review fix #4). New duplicates are refused; this lists any
+    that already exist so an admin can rename one of each pair."""
+    con = db()
+    try:
+        rows = con.execute("""SELECT LOWER(TRIM(name)) AS k, STRING_AGG(name || ' (' || COALESCE(emp_uid,'') || ')', ', ') AS who,
+                                     COUNT(*) AS n
+                              FROM employees WHERE deleted_at IS NULL
+                              GROUP BY LOWER(TRIM(name)) HAVING COUNT(*) > 1""").fetchall()
+    finally:
+        con.close()
+    for r in rows:
+        print("[warning] %d employees share the name %s - rename all but one, because work is "
+              "assigned by name." % (r["n"], r["who"]), file=sys.stderr, flush=True)
+
+
 if __name__ != "__main__":
     init_db()
+    init_review_fixes()
+    warn_duplicate_employee_names()
+    start_outbox_sender()
 
 
 def _serve_forever():
     init_db()
+    init_review_fixes()
+    warn_duplicate_employee_names()
+    start_outbox_sender()
+    # Optional HTTPS for the local / office-LAN mode (review fix #16). Without it, every
+    # password typed on the office Wi-Fi travels in plain text.
+    cert, key = _env("TLS_CERT_FILE", "").strip(), _env("TLS_KEY_FILE", "").strip()
+    server = QuietThreadingHTTPServer((HOST, PORT), Handler)
+    scheme = "http"
+    if cert and key:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(cert, key)
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        scheme = "https"
     ip = lan_ip()
     print("=" * 56)
     print("  MATIZ TECHNOLOGY is running!")
-    print("  On THIS computer, open:      http://localhost:%d" % PORT)
+    print("  On THIS computer, open:      %s://localhost:%d" % (scheme, PORT))
     if ip and ip != "127.0.0.1":
         print("  On the SAME WIFI, employees / team members open:")
-        print("      http://%s:%d" % (ip, PORT))
+        print("      %s://%s:%d" % (scheme, ip, PORT))
     else:
         print("  Could not detect a network IP automatically.")
         print("  Run 'ipconfig' (Windows) or 'ifconfig' (Mac/Linux) to find it.")
+    if scheme == "http":
+        print("  WARNING: plain HTTP - passwords and client data cross the network unencrypted.")
+        print("  For real use, use the Render (HTTPS) deployment, or set TLS_CERT_FILE and")
+        print("  TLS_KEY_FILE to serve HTTPS here.")
     print("  Data is stored in PostgreSQL (DATABASE_URL).")
     print("  Press Ctrl+C to stop the server.")
     print("=" * 56)
-    QuietThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    server.serve_forever()
 
 
 if __name__ == "__main__":

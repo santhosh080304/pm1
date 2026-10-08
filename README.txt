@@ -92,8 +92,18 @@ SEVERAL DASHBOARDS IN ONE BROWSER
   Refreshing a tab keeps it signed in. Note: pasting the SAME address into the SAME tab is
   treated by Chrome as a refresh, so that tab stays signed in - use a new tab instead.
 
-TESTS
-  See tests/README.md (quick checks: ./tests/run_unit.sh; full browser tests: ./tests/run_e2e.sh).
+TESTS AND CI
+  The tests start the real app (gunicorn, production settings) against a THROWAWAY
+  PostgreSQL database. The database is wiped first, so its name must contain "test":
+      pip install -r requirements-dev.txt
+      TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/matiz_test pytest -q tests
+  tests/test_security.py  - one test per review finding (approvals, assignee checks,
+                            forged names, sessions, lockout, zip bomb, gzip ...)
+  tests/test_pipeline.py  - one client through every stage, each step by the right login
+  tests/test_frontend_syntax.py - every inline <script> in index.html parses (needs Node)
+  GitHub Actions (.github/workflows/ci.yml) runs lint, bandit, pip-audit and the tests on
+  every push. In Render -> the web service -> Settings, set Auto-Deploy to
+  "After CI Checks Pass" so a failing build is never deployed.
 
 MY PROFILE (every dashboard)
   Everyone has "My profile" in the sidebar and can update it any time.
@@ -126,3 +136,30 @@ IMPORT OLD WORK  (Technical Manager -> sidebar "Import Old Work")
 
 SERVICES
   "EPORS" and "Scopus paid without implementation" are the same service.
+
+SECURITY SETTINGS (optional environment variables)
+  APP_BASE_URL              address used in invitation / reset e-mail links (set this on Render)
+  INVITE_CODE_DAYS          days a client setup code works (default 7)
+  IMPERSONATION_MAX_MINUTES minutes a "Log in as <employee>" session lasts (default 60)
+  LOGIN_RATE_PER_IP         sign-in attempts per 5 minutes from one address (default 60)
+  LOGIN_FAILS_PER_ACCOUNT   wrong passwords per 15 minutes before one account pauses (default 8)
+  API_RATE_PER_TAB          requests per minute from one signed-in tab (default 240)
+  API_RATE_PER_IP           requests per minute from one address, e.g. a whole office (default 2400)
+  XLSX_MAX_PART_BYTES       largest unzipped part of an uploaded .xlsx (default 40 MB)
+  TLS_CERT_FILE, TLS_KEY_FILE  serve HTTPS in local / office-LAN mode (python server.py)
+  REQUIRE_2FA               admins (default) | all | off - who must use two-step sign-in
+  RESET_2FA_ROLE            e.g. super_admin - clears that login's two-step sign-in at start-up
+                            (lost phone); remove it again afterwards
+  MIN_PASSWORD_LENGTH       minimum length for new passwords (default 10)
+  Keep SECRET_KEY unchanged across deploys: it also protects two-step keys, Aadhaar hashes
+  and client setup codes.
+  See REVIEW_FIXES.txt for the latest security changes, and docs/changes/ for older notes.
+
+NAMES MUST BE UNIQUE
+  Work is assigned to team members by name, so two active team members can no longer share
+  a name (add an initial or a place: "Ravi K.", "Ravi (Chennai)"). If two already do, the
+  server prints a warning at start-up - rename one of them in Team.
+
+THIRD-PARTY CODE
+  index.html embeds qrcode-generator 1.4.4 by Kazuhiko Arase (MIT licence) to draw the
+  two-step sign-in QR code in the browser.

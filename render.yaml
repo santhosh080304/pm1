@@ -9,7 +9,7 @@ services:
     runtime: python
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --workers 1 --threads 8 --timeout 120 --bind 0.0.0.0:$PORT server:app
+    startCommand: gunicorn --workers 1 --threads 8 --timeout 120 --access-logfile - --bind 0.0.0.0:$PORT server:app
     healthCheckPath: /health
     # One worker is deliberate: the app keeps some in-process state (e.g.
     # "typing..." indicators). Scale with threads, not workers. The actual
@@ -25,7 +25,9 @@ services:
           name: matiz-db
           property: connectionString
       - key: SECRET_KEY
-        generateValue: true
+        generateValue: true     # generated once - never change it (protects 2FA keys, Aadhaar hashes, setup codes)
+      - key: REQUIRE_2FA
+        value: admins           # admins | all | off
       - key: TRUST_PROXY
         value: "true"
       - key: TZ

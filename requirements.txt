@@ -1,6 +1,9 @@
 # Production deployment, local configuration and the PostgreSQL driver.
-# Everything else is standard library.
+# Everything else is standard library. Versions are pinned so a deploy installs exactly
+# what CI tested; update them on purpose (and let CI run) rather than by accident.
+#
+# python-dotenv was removed: server.py has its own .env loader and never imported it,
+# and the pinned 1.0.1 carried CVE-2026-28684 (review fix #17).
 
 gunicorn==23.0.0        # production WSGI server (see Procfile / render.yaml)
-python-dotenv==1.0.1    # optional: loads .env locally; a built-in fallback exists
-psycopg2-binary>=2.9.11,<3.0  # PostgreSQL driver - 2.9.11+ is required for Python 3.14 support
+psycopg2-binary==2.9.13 # PostgreSQL driver (2.9.11+ is required for Python 3.14)

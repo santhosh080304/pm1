@@ -1,0 +1,174 @@
+REVIEW FIXES - 8 Oct 2026
+=========================
+Fixes for the findings in "PM Tool code review and grade" (numbers match its fix list).
+Every fix has a test in tests/ that fails on the old code and passes on this one:
+29 security tests + 2 end-to-end pipeline tests + 1 front-end syntax test, 32 in all.
+The full pipeline test (new lead -> COMPLETED, every step by the right login) passes
+on both the old and the new code, so normal work is unchanged.
+
+
+FIXED
+-----
+#1  HIGH  Staff could approve a proposal / implementation / paper "as the client"
+          client_approve_* and client_request_correction_* now work only from a client
+          portal login - not for any staff login, Admin included. Staff who must move on
+          without the client keep using "Continue without client approval" (reason
+          required, their name recorded). The staff UI never showed these buttons.
+
+#2  HIGH  Pipeline steps didn't check who was doing them
+          16 steps (submit proposal, coordinator take/assign/decide, writing demo, writer
+          resubmits, mark writing completed, formatting and proofreading decisions) now
+          check that an individual employee is the one assigned to that client for that
+          step - the same rule the dashboard uses to show the button. Department logins
+          are limited to their own team's steps (Technical for technical steps, Journal for
+          journal steps); Marketing and Accounts logins can no longer call them.
+
+#3  HIGH  Department logins could write any name into the client history
+          empName now comes only from an individual employee's session. For department
+          logins the history shows the login's own label (e.g. "Technical Manager").
+          Steps no longer fall back to recording the ASSIGNED person's name when someone
+          else clicked. (Schedule demo still lets a manager pick the employee who gives
+          the demo; that name is now checked against active employees.)
+
+#4  HIGH  Two employees with the same name shared each other's work
+          A name can be used by only one team member (case and spaces ignored): add,
+          edit, restore and Team import all refuse a clash. Existing duplicates are listed
+          in the server log at start-up - rename one of each pair.
+          Still to do later: store employee IDs instead of names in assignments.
+
+#5  HIGH  Every tab downloaded the whole database every 12 seconds
+          - The server numbers every change. The 12-second refresh sends the number it
+            has and gets back {"unchanged": true} (34 bytes, ~2 ms) when nothing changed.
+            It still reloads fully after any change, and at least every 2 minutes.
+          - JSON responses and index.html are gzipped; index.html is cached with an ETag
+            (304 when unchanged instead of 1.15 MB).
+          - 18 indexes added (client_id on history, messages, documents, tasks, calls,
+            queries ...; task_id on stages/comments; sessions by employee/client).
+          Measured at 8,000 clients: unchanged refresh 2 ms / 34 bytes (was ~1 s / 25 MB);
+          12 tabs polling every second: median 12 ms.
+          Still to do later: a full reload still sends everything; paging per screen is
+          the next step if the data keeps growing.
+
+#6  HIGH  No CI pipeline or tests
+          .github/workflows/ci.yml: ruff, bandit, pip-audit and pytest (PostgreSQL 16
+          service) on every push. tests/ holds the suite (see README "TESTS AND CI").
+          YOU STILL NEED TO: push this to GitHub, and in Render set the web service's
+          Settings -> Auto-Deploy to "After CI Checks Pass".
+
+#7  MED   SMTP fallback didn't verify Gmail's certificate
+          SMTP_SSL and STARTTLS now use ssl.create_default_context().
+
+#8  MED   .xlsx zip bomb (0.5 MB upload -> +750 MB memory)
+          Sizes are checked from the zip directory before unzipping (40 MB per part,
+          80 MB total, configurable) and each part is read with a hard cap.
+
+#9  MED   Changing a password didn't sign out other sessions
+          Every password change or reset (self-service, Admin, manager, client portal,
+          invite set-up) signs that login out everywhere except the tab that made the
+          change. Changing a shared department password signs out everyone using it.
+          Also fixed: the client portal's "change password" always failed ("Unknown role").
+
+#10 MED   Rate limits blocked whole offices, not attackers
+          Wrong passwords are now counted per account: 8 in 15 minutes pauses that one
+          account (any number of IPs). Per-IP sign-ins raised to 60 per 5 minutes;
+          general API limit is now 240/min per signed-in tab plus 2,400/min per IP.
+          All configurable (README "SECURITY SETTINGS").
+
+#11 MED   Portal setup codes went to every department dashboard
+          Removed from the dashboard data (the page never used them) and from backup
+          files. Staff still get a code from "Copy invite link" / "Send invite".
+          Still stored in plain text in the database.
+
+#12 MED   CSV exports ran spreadsheet formulas
+          All 10 exports pass cells through csvCell(), which neutralises a leading
+          = + - @ (plain negative numbers are left alone).
+
+#14 LOW   Login said whether an employee ID / client phone exists
+          One message for unknown ID and wrong password; unknown IDs are checked against
+          a dummy hash so they take the same time.
+
+#15 LOW   The CSP blocked the page's Google Fonts
+          fonts.googleapis.com / fonts.gstatic.com allowed in style-src / font-src.
+
+#16 LOW   Local / office-LAN mode was plain HTTP
+          Set TLS_CERT_FILE and TLS_KEY_FILE to serve HTTPS from python server.py; the
+          start-up banner now warns when it is plain HTTP.
+
+#17 LOW   Unused python-dotenv with a CVE
+          Removed. Dependencies pinned (requirements.txt); dev tools in requirements-dev.txt.
+
+#18 LOW   Health check / logs
+          /health now checks the database (503 when it can't answer). gunicorn writes an
+          access log (Procfile, render.yaml).
+
+#19 LOW   Chat trusted the browser about which side a message came from
+          Sender side and reader side come from the session: staff can't post as the
+          client or mark the client's messages as read.
+
+#20 LOW   Repo tidy-up
+          Dead ai_scheduler.py deleted; the old *_UPDATE.txt notes moved to docs/changes/.
+
+Also: client IDs in a few inline handlers now go through jsq() like everything else.
+
+
+SECOND ROUND - deployment hardening (same day)
+----------------------------------------------
+2FA       Two-step sign-in (authenticator app codes: Google / Microsoft Authenticator, Authy)
+          - Super Admin and MD Admin MUST use it. On their next sign-in they see a QR code
+            to scan; after that every sign-in needs the password AND the 6-digit code.
+          - Every other department login can turn it on in Settings -> Two-step sign-in.
+            A shared login: everyone who uses it scans the same QR code when it is set up.
+          - REQUIRE_2FA=all makes it compulsory for every department login (=off: optional).
+          - A used code can't be used again; wrong codes count toward the account lockout.
+          - Lost phone: Super Admin / MD Admin -> Settings -> "Reset another login's two-step
+            sign-in". If BOTH admins lose theirs: set RESET_2FA_ROLE=super_admin on Render,
+            redeploy, sign in and set up again, then remove RESET_2FA_ROLE.
+          - The keys are stored encrypted (keyed from SECRET_KEY).
+
+#13       Aadhaar numbers are no longer stored at all. The app keeps only the last 4 digits
+          (for the masked display) and a keyed hash (for the duplicate-employee check), so a
+          leaked database holds no Aadhaar numbers and there is no key that could be lost.
+          Existing numbers are converted automatically at start-up.
+
+#13       Backups are encrypted. "Download backup" asks for a backup password (10+ chars)
+          and encrypts the file in the browser (AES-256-GCM, PBKDF2 310,000 rounds) before it
+          is saved; restoring asks for the same password. Without it the file is useless -
+          keep the password somewhere safe (old unencrypted backups still restore).
+
+#11       Client setup codes are now stored only as a keyed hash. Because a code can't be
+          shown again, "Copy invite link" / "Send invite" always issue a NEW code and the
+          previous one stops working. Codes sent before this update keep working until expiry.
+
+PWD       New passwords need 10+ characters and are checked against a list of the most
+          common passwords (password123, imatiz@123 ...). Existing passwords keep working.
+
+MAIL      Emails go into a mail_outbox table first and a background sender delivers them,
+          retrying after 1, 5, 15, 60, 180 and 720 minutes. A restart or deploy no longer
+          loses email that hadn't gone out yet.
+
+IMPORTANT  SECRET_KEY now also protects the two-step keys, the Aadhaar hashes and the setup
+          codes. Keep it the same across deploys (render.yaml generates it once). If it ever
+          changes: admins reset two-step sign-in (RESET_2FA_ROLE), pending invitations must
+          be re-sent, and the duplicate-Aadhaar check won't recognise older entries.
+
+
+NOT CHANGED (needs a bigger change)
+-----------------------------------
+-         The 4,709-line request handler is unchanged. The new tests make splitting it
+          safe to do step by step.
+-         Shared department logins and the CSP's 'unsafe-inline' are design choices that
+          stay as they were.
+-         Emails are still sent from in-memory background threads (lost on a restart).
+
+
+DEPLOYING
+---------
+1. No new environment variables are required; the new ones are optional.
+2. On first start the app creates the new indexes and an app_state table by itself.
+3. After deploying, check Render -> Logs for "[warning] ... share the name" lines and
+   rename those team members.
+4. Tell staff: 8 wrong passwords pause an account for 15 minutes ("Forgot password"
+   still works), and changing a department password signs everyone on it out.
+5. Have an authenticator app ready on the Super Admin's and MD Admin's phones before the
+   first sign-in after deploying - they will be asked to scan a QR code.
+6. Tell whoever downloads backups to choose and safely store a backup password.
