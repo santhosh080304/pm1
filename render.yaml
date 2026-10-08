@@ -27,7 +27,7 @@ services:
       - key: SECRET_KEY
         generateValue: true     # generated once - never change it (protects 2FA keys, Aadhaar hashes, setup codes)
       - key: REQUIRE_2FA
-        value: admins           # admins | all | off
+        value: "off"            # off (password only) | optional | admins | all
       - key: TRUST_PROXY
         value: "true"
       - key: TZ

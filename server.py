@@ -111,12 +111,15 @@ API_RATE_PER_TAB = max(60, int(_env("API_RATE_PER_TAB", "240")))               #
 API_RATE_PER_IP = max(180, int(_env("API_RATE_PER_IP", "2400")))              # calls / min / IP (whole office)
 
 # ----- two-step sign-in (authenticator-app codes) for Admin and department logins -----
-#   REQUIRE_2FA = "admins" (default): Super Admin and MD Admin must use it; other
-#                 department logins may turn it on in Settings.
-#               = "all": every department login must use it.   = "off": optional for all.
+#   REQUIRE_2FA = "off" (default): no two-step sign-in at all - every login opens with
+#                 the password (+ captcha) only; codes set up earlier are ignored and the
+#                 Settings option is hidden.
+#               = "optional": any department login may turn it on in Settings.
+#               = "admins": Super Admin and MD Admin must use it; others optional.
+#               = "all": every department login must use it.
 #   RESET_2FA_ROLE = comma-separated roles whose two-step sign-in is cleared at start-up
 #                 (recovery when the phone with the codes is lost; remove it afterwards).
-REQUIRE_2FA = _env("REQUIRE_2FA", "admins").strip().lower()
+REQUIRE_2FA = _env("REQUIRE_2FA", "off").strip().lower()
 RESET_2FA_ROLE = [r.strip() for r in _env("RESET_2FA_ROLE", "").split(",") if r.strip()]
 
 # ----- login CAPTCHA (required on every sign-in, for every dashboard) -----
@@ -7331,7 +7334,7 @@ def _handle_action_core(action, d, ip=""):
                 raise ApiError("This role's access has been disabled by the Super Admin. Contact them for help.")
             if not verify_password(d.get("password") or "", u["password"] or ""):
                 raise login_failed("Incorrect password. Please try again.")
-            if u["totp_enabled"] or role_requires_2fa(role):
+            if two_step_available() and (u["totp_enabled"] or role_requires_2fa(role)):
                 return start_otp_ticket(con, role, u, d.get("_browser_key"), ip)
             delete_session(con, d.get("_session_token"))
             sess = create_session(con, "dept", role, ip=ip, browser_key=d.get("_browser_key"))
@@ -7383,7 +7386,10 @@ def _handle_action_core(action, d, ip=""):
             u = con.execute("SELECT * FROM users WHERE role=?", (my_role,)).fetchone()
             required = role_requires_2fa(my_role)
             if action == "otp_status":
-                return {"enabled": bool(u["totp_enabled"]), "required": required}
+                return {"enabled": bool(u["totp_enabled"]) and two_step_available(),
+                        "required": required, "available": two_step_available()}
+            if not two_step_available() and action in ("otp_setup_start", "otp_setup_confirm"):
+                raise ApiError("Two-step sign-in is switched off for this app.")
             if action == "otp_setup_start":
                 secret = new_totp_secret()
                 con.execute("UPDATE users SET totp_pending=? WHERE role=?", (seal(secret), my_role))
@@ -12858,8 +12864,13 @@ def totp_uri(secret_b32, role):
         label, secret_b32, urllib.parse.quote(TOTP_ISSUER))
 
 
+def two_step_available():
+    """False when two-step sign-in is switched off for the whole app (REQUIRE_2FA=off)."""
+    return REQUIRE_2FA != "off"
+
+
 def role_requires_2fa(role):
-    if REQUIRE_2FA == "off":
+    if REQUIRE_2FA in ("off", "optional"):
         return False
     if REQUIRE_2FA == "all":
         return True

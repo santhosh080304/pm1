@@ -147,7 +147,8 @@ SECURITY SETTINGS (optional environment variables)
   API_RATE_PER_IP           requests per minute from one address, e.g. a whole office (default 2400)
   XLSX_MAX_PART_BYTES       largest unzipped part of an uploaded .xlsx (default 40 MB)
   TLS_CERT_FILE, TLS_KEY_FILE  serve HTTPS in local / office-LAN mode (python server.py)
-  REQUIRE_2FA               admins (default) | all | off - who must use two-step sign-in
+  REQUIRE_2FA               off (default) = password only, no two-step sign-in for anyone
+                            optional | admins | all = turn two-step sign-in back on
   RESET_2FA_ROLE            e.g. super_admin - clears that login's two-step sign-in at start-up
                             (lost phone); remove it again afterwards
   MIN_PASSWORD_LENGTH       minimum length for new passwords (default 10)

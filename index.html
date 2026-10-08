@@ -18516,19 +18516,21 @@ function otpSettingsHtml(){
   if(role==="employee" || role==="client" || role==="validator") return "";
   const isAdmin = role==="super_admin" || role==="md_admin";
   const opts = Object.entries(roleEmailLabels||{}).map(([k,v])=>`<option value="${esc(k)}">${esc(v)}</option>`).join("");
-  return `<div style="height:1px;background:var(--line);margin:18px 0"></div>
+  return `<div id="otpSection"><div style="height:1px;background:var(--line);margin:18px 0"></div>
     <h3>Two-step sign-in</h3>
     <p class="msub" id="otpStatusLine">Checking&hellip;</p>
     <div class="modal-actions" id="otpActions"></div>
     ${isAdmin && opts ? `<h3 style="margin-top:14px">Reset another login's two-step sign-in</h3>
       <p class="msub">Use this when the phone with the codes is lost. That login is signed out and sets up a new code at its next sign-in.</p>
       <div class="field"><select id="otpResetRole">${opts}</select></div>
-      <div class="modal-actions"><button class="btn ghost" onclick="adminResetOtp()">Reset two-step sign-in</button></div>` : ""}`;
+      <div class="modal-actions"><button class="btn ghost" onclick="adminResetOtp()">Reset two-step sign-in</button></div>` : ""}</div>`;
 }
 async function loadOtpStatus(){
   const line = $("otpStatusLine"); if(!line) return;
   try{
     const st = await api("otp_status", {});
+    // Switched off for the whole app (REQUIRE_2FA=off): hide the section entirely.
+    if(st.available === false){ const sec = $("otpSection"); if(sec) sec.style.display = "none"; return; }
     line.textContent = st.enabled ? "On: signing in to this login needs the password and a code from the authenticator app."
       : (st.required ? "Required for this login: you'll be asked to set it up at your next sign-in."
                      : "Off. Turn it on so that a stolen password alone can't open this login.");
