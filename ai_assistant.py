@@ -585,9 +585,14 @@ def client_summary(ctx, family, focus=""):
         if ctx.money and isinstance(c.get("payments"), dict):
             conf = (ctx.services.get(c.get("serviceKey") or "") or {}).get("amounts") or {}
             pay_bits, paid, pending_keys = [], 0.0, []
+            # A client with an agreed Total amount / split-up follows that real plan, so the
+            # service's default stage list (Start Work, Code, Paper...) isn't owed on top of it.
+            custom_plan = _num(c.get("totalAmount")) > 0 or bool(c.get("installments"))
             for k in PAY_KEYS:
                 p = c["payments"].get(k) or {}
                 if k not in conf and p.get("status") != "paid":
+                    continue
+                if custom_plan and k != "reg" and p.get("status") != "paid":
                     continue
                 if p.get("status") == "paid":
                     paid += _num(p.get("amount"))

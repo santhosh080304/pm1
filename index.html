@@ -216,8 +216,23 @@ a{color:var(--purple)}
 .sidebar{color:var(--ink-text);
   width:248px;flex-shrink:0;background:linear-gradient(180deg,var(--ink) 0%,var(--ink2) 100%);
   border-right:1px solid var(--ink-line);box-shadow:2px 0 24px -14px rgba(0,0,0,.4);
-  padding:20px 15px;display:flex;flex-direction:column;gap:5px;position:sticky;top:0;height:100vh;
+  padding:20px 15px;display:flex;flex-direction:column;gap:5px;position:sticky;top:0;height:100vh;height:100dvh;
+  /* Long menus (e.g. Technical Manager) scroll inside the dark sidebar instead of spilling
+     the bottom items (Dark mode / Log out) out onto the white page below it. */
+  overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;
+  scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.22) transparent;
 }
+.sidebar > *{flex-shrink:0}
+.sidebar::-webkit-scrollbar{width:6px}
+.sidebar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.22);border-radius:6px}
+.sidebar::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.35)}
+.side-foot{padding-bottom:6px}
+.wu-quick{display:flex;flex-wrap:wrap;gap:8px}
+.wu-chip{border:1px solid var(--line-strong);background:var(--card,#fff);color:var(--text);border-radius:999px;
+  padding:7px 13px;font-size:13px;font-weight:600;line-height:1.3;cursor:pointer;text-align:left;
+  transition:background .15s,border-color .15s,color .15s}
+.wu-chip:hover{border-color:var(--gold,#0E7490)}
+.modal .wu-chip.on,.modal .wu-chip.on:hover{background:#0E7490;border-color:#0E7490;color:#fff;opacity:1}
 .side-brand{display:flex;align-items:center;gap:11px;margin-bottom:18px;padding-bottom:16px;border-bottom:1px solid var(--ink-line)}
 .side-brand .mono{width:38px;height:38px;font-size:16px;border-radius:50%}
 .side-brand div b{font-family:var(--disp);font-weight:600;font-size:16.5px;display:block;line-height:1.15;color:#fff}
@@ -2956,6 +2971,7 @@ function tcClientRow(c, actionsHtml, extraHtml){
       <div class="lbl"><b>${esc(c.name)}</b> <span class="badge b-dim">${c.displayId||c.id}</span> <span class="badge b-dim" title="Project ID">${esc(c.projectId||c.id)}</span> ${serviceFamilyBadgeHtml(c)} ${c.onHold?'<span class="badge b-bad">On hold</span>':""} ${c.rejected?'<span class="badge b-bad">Rejected</span>':""}</div>
       <div style="font-size:12px;color:var(--muted);margin-top:4px">${esc(c.domain||"no domain")} &bull; ${esc(c.phone||"")} &bull; Deadline: ${fmtDate(c.deadlineDate)}</div>
       <div style="margin-top:8px"><span class="stage-chip ${chipClass(c.stage)}">${STAGE_LABEL[c.stage]}</span></div>
+      ${paymentSummaryHtml(c)}
       ${extraHtml||""}
     </div>
     ${actionsHtml?`<div onclick="event.stopPropagation()" style="display:flex;gap:8px;flex-wrap:wrap">${actionsHtml}</div>`:""}
@@ -3029,7 +3045,7 @@ function renderTcDashboard(){
 
 function renderTcRegistered(){
   let html = tcSearchBarHtml();
-  const list = clients.filter(c=>!c.rejected && PAY_KEYS.some(k=>c.payments[k].status==='paid')).filter(matchesSearch);
+  const list = clients.filter(c=>!c.rejected && c.payments && clientPaymentPlan(c).paidCount>0).filter(matchesSearch);
   const body = list.map(c=>tcClientRow(c,"")).join("");
   html += tcPanel("Registered clients (at least one payment made)", list.length, body, "No client has made a payment yet.");
   $("content").innerHTML = html;
@@ -3063,7 +3079,8 @@ function renderTcAccounts(){
 }
 
 function renderTcPayPending(payKey){
-  const list = clients.filter(c=>!c.rejected && stageIdx(c.stage)>=3 && c.payments[payKey].status!=='paid');
+  const list = clients.filter(c=>!c.rejected && stageIdx(c.stage)>=3 && c.payments && c.payments[payKey]
+    && c.payments[payKey].status!=='paid' && activePayKeys(c).includes(payKey) && !clientPaymentPlan(c).fullyPaid);
   const body = list.map(c=>tcClientRow(c,"",
     `<div style="font-size:12px;margin-top:6px">${PAY_LABELS[payKey]}: <b style="color:#B42318">Pending</b></div>`)).join("");
   $("content").innerHTML = tcPanel(PAY_LABELS[payKey] + " — pending", list.length, body, "No client is pending this payment right now.");
@@ -3626,10 +3643,20 @@ function reviewActionHtml(action, id){
     </div>
   </div>`;
 }
+// Journal Manager: who on the Submission team gets the paper once formatting is approved.
+function jmSubmissionPickHtml(c){
+  const names = journalNames("SUBMISSION");
+  if(!names.length) return "";
+  return `<div class="field" style="margin:10px 0 0;max-width:360px" onclick="event.stopPropagation()"><label>Assign submission to</label>
+    <select id="jsub-${esc(String(c.id))}"><option value="">Whole Submission team</option>
+      ${names.map(n=>`<option value="${esc(n)}" ${c.submissionPerson===n?"selected":""}>${esc(n)}</option>`).join("")}</select></div>`;
+}
 async function reviewDecision(action, id, approve){
   const note = ($("rvnote-"+id)||{}).value || "";
   if(!approve && !note.trim()){ toast("Add a note for the writer before requesting a correction"); return; }
-  try{ await api(action, {clientId:id, approve, note}); }catch(e){ toast(e.message); return; }
+  const payload = {clientId:id, approve, note, empName};
+  if(action==="format_manager_decision" && approve) payload.submissionPerson = ($("jsub-"+id)||{}).value || "";
+  try{ await api(action, payload); }catch(e){ toast(e.message); return; }
   await refresh();
   toast(approve ? "Approved and forwarded" : "Sent back to the writer");
 }
@@ -5139,14 +5166,18 @@ function renderJMTeam(){ renderTMTeam(); }
 
 
 function allEmployeesBoardHtml(){
-  const groups = [
+  // Marketing TL / Marketing Manager only see their own BDC team here — not the
+  // Technical (programmers, writers) or Journal teams.
+  const mktOnly = role==="marketing_tl" || role==="marketing_manager";
+  const groups = mktOnly ? [["TELECALLER","BDC"]] : [
     ["TELECALLER","BDC"], ["PROGRAMMER","Programmers"], ["PAPER_WRITER","Paper Writers"],
   ];
-  const jTypes = [["PROOFREAD_COORDINATOR","Proofreading Coordinators"], ["PROOFREADER","Proofreaders"],
+  const jTypes = mktOnly ? [] : [["PROOFREAD_COORDINATOR","Proofreading Coordinators"], ["PROOFREADER","Proofreaders"],
     ["FORMAT_COORDINATOR","Formatting Coordinators"], ["FORMATTER","Formatters"], ["SUBMISSION","Submission Team"]];
   const empRow = e => `<button class="roster-chip" style="cursor:pointer" onclick="openEmployeeDrawer(${e.id})">
       <span class="dot"></span>${esc(e.name)}<small style="color:var(--muted);margin-left:6px;font-weight:700">${esc(e.empUid||"")}</small></button>`;
-  let html = sectionHead("All Employees", employees.length);
+  const shownCount = mktOnly ? employees.filter(e=>e.role==="TELECALLER").length : employees.length;
+  let html = sectionHead(mktOnly ? "My Team — BDC" : "All Employees", shownCount);
   html += `<div class="panel" style="padding:16px 20px"><div class="roster-wrap">`;
   groups.forEach(([role,label])=>{
     const list = employees.filter(e=>e.role===role);
@@ -5296,6 +5327,7 @@ async function deleteEmployee(id, name){
 }
 function openEmployeeDrawer(id){
   const e = findEmployee(id); if(!e) return;
+  if(e.otherTeam){ toast("That employee is in another team."); return; }
   const {current, previous} = employeeWork(e.name, e.role);
   const timeline = employeeTimeline(e.name);
   const roleBadge = e.role==='JOURNAL_EMPLOYEE' ? (EMP_ROLE_LABEL[e.teamType]||e.teamType) : (EMP_ROLE_LABEL[e.role]||e.role);
@@ -5568,20 +5600,53 @@ function jmAwPickerHtml(c, teamType, placeholder, emptyMsg){
     <div class="ms-select-pop" onclick="event.stopPropagation()">${opts}</div>
   </div>`;
 }
+// Assign list for the Journal Manager: the team members themselves (proofreaders /
+// formatters - pick one or more) plus, optionally, one coordinator. Picking only a
+// coordinator keeps the old flow (the coordinator chooses the team); picking team
+// members starts the work straight away.
+function jmAwTeamPickerHtml(c, coordType, memberType, memberLabel, placeholder, emptyMsg){
+  const coords = journalNames(coordType), members = journalNames(memberType);
+  if(!coords.length && !members.length) return `<span style="color:var(--muted);font-size:13px">${emptyMsg}</span>`;
+  const cid = esc(String(c.id));
+  const opt = (n, kind) => `<label class="ms-select-opt"><input type="checkbox" data-jaw-pick="${cid}" data-kind="${kind}" value="${esc(n)}" onchange="jmAwPickChanged(this)"> ${esc(n)}</label>`;
+  const head = t => `<div style="font-size:10.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:8px 10px 2px">${t}</div>`;
+  const opts = (members.length ? head(memberLabel) + members.map(n=>opt(n,"member")).join("") : "")
+    + (coords.length ? head("Coordinator (optional — max one)") + coords.map(n=>opt(n,"coord")).join("") : "");
+  return `<div class="ms-select">
+    <div class="ms-select-trigger" onclick="msToggleDropdown(event,this)">
+      <span class="ms-select-display" data-placeholder="${placeholder}">${placeholder}</span>
+      <svg class="ms-select-caret" viewBox="0 0 20 20" fill="none"><path d="M5 8l5 5 5-5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="ms-select-pop" onclick="event.stopPropagation()">${opts}</div>
+  </div>`;
+}
+function jmAwPickChanged(el){
+  // Only one coordinator at a time.
+  if(el.dataset.kind==="coord" && el.checked){
+    const pop = el.closest(".ms-select-pop");
+    pop.querySelectorAll('input[data-kind="coord"]').forEach(x=>{ if(x!==el) x.checked = false; });
+  }
+  msUpdateDisplay(el);
+}
 async function jmAwAssignNow(id, type){
-  const pick = document.querySelector(`input[data-jaw-pick="${CSS.escape(String(id))}"]:checked`);
-  const name = pick ? pick.value : "";
+  const picks = Array.from(document.querySelectorAll(`input[data-jaw-pick="${CSS.escape(String(id))}"]:checked`));
+  const coord = (picks.find(x=>x.dataset.kind==="coord")||{}).value || "";
+  const members = picks.filter(x=>x.dataset.kind!=="coord").map(x=>x.value);
   const sd = ($("jaw-sd-"+id)||{}).value || "";
   const dl = ($("jaw-dl-"+id)||{}).value || "";
-  const who = type==="PROOFREADING" ? "proofreading coordinator" : "formatting coordinator";
-  if(!name || !dl){ toast(`Pick a ${who} and a deadline`); return; }
+  const who = type==="PROOFREADING" ? "proofreader (or a coordinator)" : "formatter (or a coordinator)";
+  if(!coord && !members.length){ toast(`Pick at least one ${who}`); return; }
+  if(!dl){ toast("Pick a deadline"); return; }
   if(sd && dl && sd > dl){ toast("Start date can't be after the deadline"); return; }
   const action = type==="PROOFREADING" ? "assign_proofread_coordinator" : "assign_format_coordinator";
-  try{ await api(action, {clientId:id, name, startDate:sd, deadline:dl}); }
+  const payload = {clientId:id, name:coord, startDate:sd, deadline:dl, actorLabel: roleTitle()};
+  payload[type==="PROOFREADING" ? "proofreaders" : "formatters"] = members;
+  try{ await api(action, payload); }
   catch(e){ toast(e.message); await refresh(); return; }
   jmAwOpen.delete(String(id));
   await refresh();
-  toast(`${JM_AW_LABEL[type]} assigned to ${name}`);
+  const names = [...members, ...(coord?[coord+" (coordinator)"]:[])].join(", ");
+  toast(`${JM_AW_LABEL[type]} assigned to ${names}`);
 }
 function jmAwMetaHtml(c){
   return `${c.journalName?`<span class="aw-meta">Journal: <b>${esc(c.journalName)}</b></span>`:""}
@@ -5623,11 +5688,11 @@ function jmAssignWorkHtml(){
     const type = c.stage==="JOURNAL_MANAGER_REVIEW" ? "PROOFREADING" : "FORMATTING";
     const id = String(c.id);
     const open = jmAwOpen.has(id);
-    const note = type==="PROOFREADING" ? "Client approved the paper — needs a proofreading coordinator"
-                                       : "Proofreading approved — needs a formatting coordinator";
+    const note = type==="PROOFREADING" ? "Client approved the paper — assign proofreaders"
+                                       : "Proofreading approved — assign formatters";
     const picker = type==="PROOFREADING"
-      ? jmAwPickerHtml(c,"PROOFREAD_COORDINATOR","Select proofreading coordinator…","No proofreading coordinators yet — add one in the Team tab.")
-      : jmAwPickerHtml(c,"FORMAT_COORDINATOR","Select formatting coordinator…","No formatting coordinators yet — add one in the Team tab.");
+      ? jmAwTeamPickerHtml(c,"PROOFREAD_COORDINATOR","PROOFREADER","Proofreaders","Select proofreaders (or a coordinator)…","No proofreaders or proofreading coordinators yet — add them in the Team tab.")
+      : jmAwTeamPickerHtml(c,"FORMAT_COORDINATOR","FORMATTER","Formatters","Select formatters (or a coordinator)…","No formatters or formatting coordinators yet — add them in the Team tab.");
     const planSd = (type==="PROOFREADING"?c.proofreadStartDate:c.formatStartDate)||"";
     const planDl = (type==="PROOFREADING"?c.proofreadDeadline:c.formatDeadline)||"";
     const sd = planSd && planSd >= todayISO() ? planSd : todayISO();
@@ -5670,6 +5735,7 @@ function jmAssignWorkHtml(){
           <small class="aw-note">Coordinator: ${esc(c.formatCoordinator||"—")} &bull; Correction rounds: ${c.formatRounds||0}</small>
           <span class="aw-ra-btn"><button class="btn ghost small" onclick="admOpenProject(${jsq(c.id)})">Open project</button></span></div>
         ${jmAwStepperHtml("FORMATTING")}
+        ${jmSubmissionPickHtml(c)}
         ${reviewActionHtml('format_manager_decision', c.id)}
       </div>`).join("")}
       <div class="adm-empty aw-nomatch" style="display:none">Nothing here for this filter.</div>
@@ -5686,6 +5752,7 @@ function jmAssignWorkHtml(){
       ${ipRows.map(c=>{
         const a = jmAwAssignmentInfo(c);
         const who = a.coord ? `${esc(a.coord)}${a.type!=="SUBMISSION"?' <small style="color:var(--muted)">(coordinator)</small>':""}${a.team.length?` <small style="color:var(--muted)">&middot; team: ${a.team.map(esc).join(", ")}</small>`:""}`
+                  : a.team.length ? esc(a.team.join(", "))
                             : `<span style="color:var(--faint)">${a.type==="SUBMISSION"?"Submission team":"Not recorded"}</span>`;
         return `<div class="aw-ip" data-aw-type="${a.type}" data-aw-search="${esc(jmAwHay(c, JM_AW_LABEL[a.type]))}" onclick="admOpenProject(${jsq(c.id)})">
           <div class="aw-ip-top">${jmAwIdBadges(c)} <span class="badge b-purp">${JM_AW_LABEL[a.type]}</span>
@@ -5740,7 +5807,7 @@ function jmAssignWorkHtml(){
   <div class="adm-panel" data-aw-section>
     <div class="adm-panel-head"><h3>New work needing assignment</h3><span class="badge ${newRows.length?'b-bad':'b-purp'}" data-aw-count>${newRows.length}</span></div>
     <div class="adm-panel-body">
-      <p style="font-size:12.5px;color:var(--muted);margin-bottom:12px">These papers were just handed to the Journal Team (by the Technical team, or after proofreading was approved). <b>Click a client</b> to choose the coordinator, the start date and the deadline, then Assign &mdash; it moves forward immediately and disappears from this list.</p>
+      <p style="font-size:12.5px;color:var(--muted);margin-bottom:12px">These papers were just handed to the Journal Team (by the Technical team, or after proofreading was approved). <b>Click a client</b> to choose who does it &mdash; the proofreaders / formatters directly, or a coordinator who picks the team &mdash; plus the start date and the deadline, then Assign. It moves forward immediately and disappears from this list.</p>
       ${newRows.length ? newHtml : `<div class="adm-empty">Nothing waiting to be assigned right now.</div>`}
       <div class="adm-empty aw-nomatch" style="display:none">Nothing here for this filter.</div>
     </div>
@@ -5752,22 +5819,29 @@ function jmAssignWorkHtml(){
    Everything here is computed live from `clients`, so it always reflects what the
    Technical team has actually handed over and what the Journal Manager has assigned
    out to Proofreading / Formatting / Submission so far. ---------- */
+// Stat box used on the Journal Manager dashboard and on every employee dashboard
+// (Journal team + Technical team). Drawn exactly like the Technical Manager's boxes
+// (admKpi): title, big "X / Y", the two labels, a progress bar and a short note.
 function jmStatCard(title, leftNum, leftLabel, rightNum, rightLabel, barColors, onclick){
-  const totalN = leftNum + rightNum;
-  const p = totalN>0 ? Math.round(rightNum/totalN*100) : 0;
-  const cols = barColors || ['var(--ok)','var(--bad)'];
-  return `<div class="adm-panel" ${onclick?`style="margin:0;text-align:center;cursor:pointer" onclick="${onclick}"`:`style="margin:0;text-align:center"`}>
-    <h4 style="margin:0 0 14px;font-size:12.5px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase;font-weight:800">${esc(title)}</h4>
-    <div style="display:flex;align-items:baseline;justify-content:center;gap:10px;font-family:var(--disp);font-size:30px;font-weight:700">
-      <span>${leftNum}</span><span style="color:var(--muted);font-size:18px">/</span><span>${rightNum}</span>
-    </div>
-    <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);font-weight:700;margin:8px 2px 10px">
-      <span>${esc(leftLabel)}</span><span>${esc(rightLabel)}</span>
-    </div>
-    <div style="height:7px;border-radius:99px;overflow:hidden;display:flex;background:var(--card2)">
-      <div style="width:${100-p}%;background:${cols[0]}"></div>
-      <div style="width:${p}%;background:${cols[1]}"></div>
-    </div>
+  const l = Number(leftNum)||0, r = Number(rightNum)||0;
+  const total = l + r;
+  const pct = total>0 ? Math.round(l/total*100) : 0;
+  return `<div class="adm-kpi" ${onclick?`style="cursor:pointer" onclick="${onclick}"`:""}>
+    <h4>${esc(title)}</h4>
+    <div class="frac">${l}<span>/ ${r}</span></div>
+    <div class="sublabels"><span>${esc(leftLabel)}</span><span>${esc(rightLabel)}</span></div>
+    <div class="bar"><i class="ok" style="width:${pct}%"></i><i class="rest" style="width:${100-pct}%"></i></div>
+    <div class="note">${esc(leftLabel)} vs ${esc(String(rightLabel).toLowerCase())}</div>
+  </div>`;
+}
+// The Technical Manager box header (big "X / Y", labels, bar, note) for use inside a panel.
+function kpiHeadHtml(l, r, leftLabel, rightLabel){
+  l = Number(l)||0; r = Number(r)||0;
+  const pct = (l+r)>0 ? Math.round(l/(l+r)*100) : 0;
+  return `<div class="adm-kpi" style="border:0;box-shadow:none;padding:0;background:none;margin-bottom:16px;transform:none">
+    <div class="frac">${l}<span>/ ${r}</span></div>
+    <div class="sublabels"><span>${esc(leftLabel)}</span><span>${esc(rightLabel)}</span></div>
+    <div class="bar"><i class="ok" style="width:${pct}%"></i><i class="rest" style="width:${100-pct}%"></i></div>
   </div>`;
 }
 function jmBarChartHtml(bars){
@@ -5831,8 +5905,8 @@ function journalDashboardPanel(){
   // ----- Row of top-line stat cards, same shape as the mock: Publications / Pending Actions / Journals
   const statCards = `<div class="adm-kpi-grid" style="grid-template-columns:repeat(3,1fr)">
     ${jmStatCard("Publications", underPublication, "Under publication", publishedCt, "Published", ['var(--ok)','var(--purple-deep)'], "jmOpenPublicationsBreakdown()")}
-    ${jmStatCard("Pending Actions", toAssign.length, "Awaiting your assignment", inProgressCt, "Currently in progress", ['var(--warn)','var(--ok)'], "jmPage='tasks';jmTasksTab='assign';refresh()")}
-    ${jmStatCard("Journals", inJournal.length, "Total in journal pipeline", inJournal.length-publishedCt, "Still pending", ['var(--purple)','var(--bad)'], "jmPage='journals';refresh()")}
+    ${jmStatCard("Pending Actions", toAssign.length, "To assign", inProgressCt, "In progress", ['var(--warn)','var(--ok)'], "jmPage='tasks';jmTasksTab='assign';refresh()")}
+    ${jmStatCard("Journals", inJournal.filter(c=>c.journalStatus!=='PUBLISHED').length, "Still pending", inJournal.length, "In journal pipeline", ['var(--purple)','var(--bad)'], "jmPage='journals';refresh()")}
   </div>`;
 
   // ----- Left: "Modifications & Corrections" quick list. Blue = with formatting team,
@@ -5854,8 +5928,8 @@ function journalDashboardPanel(){
   // ----- Right of that: work waiting for the Journal Manager to assign out, so it's
   //       obvious at a glance what the Technical team has just handed over.
   const assignRows = toAssign.length ? toAssign.map(c=>{
-    const kind = c.stage==='JOURNAL_MANAGER_REVIEW' ? 'Needs a proofreading coordinator'
-      : c.stage==='JOURNAL_MANAGER_FORMATTING' ? 'Needs a formatting coordinator'
+    const kind = c.stage==='JOURNAL_MANAGER_REVIEW' ? 'Needs proofreaders (or a coordinator)'
+      : c.stage==='JOURNAL_MANAGER_FORMATTING' ? 'Needs formatters (or a coordinator)'
       : 'Formatting done — needs your final review';
     return `<div class="adm-bar-row" style="cursor:pointer" onclick="openDrawer(${jsq(c.id)})">
       <span class="lbl" style="flex:0 0 auto;max-width:none">${esc(c.name)}</span>
@@ -6072,23 +6146,59 @@ function formatCoordinatorWorkHtml(){
   return html + jeDoneHtml(clients.filter(c=> c.formatCoordinator===empName && !shown.has(c.id)));
 }
 function journalWorkerWorkHtml(stage, listField, kind){
-  const mine = clients.filter(c=>c.stage===stage && (c[listField]||[]).includes(empName));
-  const done = clients.filter(c=>c.stage!==stage && (c[listField]||[]).includes(empName));
   const coordField = kind==='proofreading' ? 'proofreadCoordinator' : 'formatCoordinator';
+  // Assigned directly by the Journal Manager (no coordinator): this person also approves
+  // the work / sends corrections, and re-checks the writer's fix.
+  const solo = c => !(c[coordField]||"").trim();
+  const myStages = kind==='proofreading' ? [stage, 'PROOFREAD_RECHECK'] : [stage];
+  const mine = clients.filter(c=>(c[listField]||[]).includes(empName)
+    && (c.stage===stage || (myStages.includes(c.stage) && solo(c))));
+  const withWriter = kind==='proofreading'
+    ? clients.filter(c=>c.stage==='PROOFREAD_CORRECTION' && solo(c) && (c[listField]||[]).includes(empName)) : [];
+  const shown = new Set([...mine, ...withWriter].map(c=>c.id));
+  const done = clients.filter(c=>!shown.has(c.id) && (c[listField]||[]).includes(empName));
   let html = sectionHead(`Assigned to me — ${kind}`, mine.length);
   if(!mine.length) html += emptyBox(`No ${kind} work assigned to you right now.`);
-  mine.forEach(c=> html += pipeCard(c, jeExtBtn(c),
-    jeDatesHtml(c, kind) + `<div class="pc-meta">Coordinator: <b>${esc(c[coordField]||"—")}</b> &mdash; tell them when you're done so they can review it.</div>`));
+  mine.forEach(c=>{
+    if(!solo(c)){
+      html += pipeCard(c, jeExtBtn(c),
+        jeDatesHtml(c, kind) + `<div class="pc-meta">Coordinator: <b>${esc(c[coordField])}</b> &mdash; tell them when you're done so they can review it.</div>`);
+      return;
+    }
+    const others = (c[listField]||[]).filter(n=>n!==empName);
+    const meta = jeDatesHtml(c, kind)
+      + `<div class="pc-meta">Assigned to you by the Journal Manager${others.length?` (with ${esc(others.join(", "))})`:""}.</div>`
+      + (c.stage==='PROOFREAD_RECHECK' ? `<div class="pc-meta" style="color:var(--gold)">The writer sent back the corrected paper &mdash; re-check it. Correction rounds: ${c.proofreadRounds||0}</div>` + proofreadDocsHtml(c) : "");
+    const act = kind==='proofreading' ? proofreadActionHtml(c, "pw")
+      : `<div class="pc-meta" style="margin-top:8px">When you're done, approve it to send it to the Journal Manager for final sign-off.</div>` + reviewActionHtml('format_decision', c.id);
+    html += pipeCard(c, jeExtBtn(c), meta + act);
+  });
+  if(withWriter.length){
+    html += sectionHead("With the writer — fixing your corrections", withWriter.length);
+    withWriter.forEach(c=>{
+      const lastNote = (c.history||[]).find(h=>h.stage==='PROOFREAD_CORRECTION' && h.note);
+      html += pipeCard(c, "", `<div class="pc-meta">Your note: ${lastNote?esc(lastNote.note):"—"}</div>` + proofreadDocsHtml(c));
+    });
+  }
   return html + jeDoneHtml(done);
 }
 function submissionWorkHtml(){
-  const toSubmit = clients.filter(c=>c.stage==='SUBMISSION');
+  // The Journal Manager may hand a paper to one Submission team member; it then shows
+  // only for them. Papers left for the "whole Submission team" show for everyone.
+  const allReady = clients.filter(c=>c.stage==='SUBMISSION');
+  const toSubmit = allReady.filter(c=>!c.submissionPerson || c.submissionPerson===empName);
+  const othersReady = allReady.filter(c=>c.submissionPerson && c.submissionPerson!==empName);
   const submitted = clients.filter(c=>c.stage==='JOURNAL_SUBMITTED');
   const done = clients.filter(c=> c.submissionPerson===empName && c.stage!=='SUBMISSION' && c.stage!=='JOURNAL_SUBMITTED');
   let html = sectionHead("Ready to submit", toSubmit.length);
   if(!toSubmit.length) html += emptyBox("No paper is waiting to be submitted.");
   toSubmit.forEach(c=> html += pipeCard(c, `<button class="btn gold small" onclick="submitToJournalNow(${jsq(c.id)})">Submit to journal &#8594;</button>`,
-    journalChipsHtml(c, "Target journals")));
+    `<div class="pc-meta">${c.submissionPerson ? "<b>Assigned to you</b> by the Journal Manager" : "For the whole Submission team"}</div>`
+    + journalChipsHtml(c, "Target journals")));
+  if(othersReady.length){
+    html += sectionHead("Assigned to other team members", othersReady.length);
+    othersReady.forEach(c=> html += pipeCard(c, "", `<div class="pc-meta">Assigned to <b>${esc(c.submissionPerson)}</b></div>`));
+  }
   html += sectionHead("Awaiting journal decision", submitted.length);
   if(!submitted.length) html += emptyBox("Nothing is waiting on a journal decision.");
   submitted.forEach(c=>{
@@ -6547,12 +6657,7 @@ function journalEmpDashboardPanel(tt){
       <div class="adm-panel" style="margin:0">
         <div class="adm-panel-head"><h3>${esc(c7Title)}</h3></div>
         <div class="adm-panel-body">
-          <div style="display:flex;align-items:baseline;gap:10px;font-family:var(--disp);font-size:28px;font-weight:700;margin-bottom:4px">
-            <span>${c7Pending}</span><span style="color:var(--muted);font-size:16px">/</span><span>${c7Done}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);font-weight:700;margin-bottom:14px">
-            <span>PENDING</span><span>COMPLETED</span>
-          </div>
+          ${kpiHeadHtml(c7Pending, c7Done, "Pending", "Completed")}
           ${breakdownHtml}
         </div>
       </div>
@@ -6563,7 +6668,7 @@ function journalEmpDashboardPanel(tt){
         <div class="adm-panel-head"><h3>New Tasks</h3><span class="badge b-purp">${newTasks.length}</span></div>
         <div class="adm-panel-body">${newTasksHtml}</div>
       </div>
-      ${jmStatCard("Correction Assignment", rejectedTasks, "Pending", acceptedTasks, "Completed", ['var(--purple)','var(--bad)'])}
+      <div style="align-self:start">${jmStatCard("Correction Assignment", rejectedTasks, "Pending", acceptedTasks, "Completed", ['var(--purple)','var(--bad)'])}</div>
       <div class="adm-panel" style="margin:0">
         <div class="adm-panel-head">
           ${calendarMonthYearPickerHtml(adminCalYear, adminCalMonth)}
@@ -6689,12 +6794,7 @@ function techDashboardPanel(role){
       <div class="adm-panel" style="margin:0">
         <div class="adm-panel-head"><h3>${esc(card7Title)}</h3></div>
         <div class="adm-panel-body">
-          <div style="display:flex;align-items:baseline;gap:10px;font-family:var(--disp);font-size:28px;font-weight:700;margin-bottom:4px">
-            <span>${card7Pending}</span><span style="color:var(--muted);font-size:16px">/</span><span>${card7Done}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);font-weight:700;margin-bottom:14px">
-            <span>PENDING</span><span>COMPLETED</span>
-          </div>
+          ${kpiHeadHtml(card7Pending, card7Done, "Pending", "Completed")}
           ${breakdownHtml}
         </div>
       </div>
@@ -6705,7 +6805,7 @@ function techDashboardPanel(role){
         <div class="adm-panel-head"><h3>New Tasks</h3><span class="badge b-purp">${newTasks.length}</span></div>
         <div class="adm-panel-body">${newTasksHtml}</div>
       </div>
-      ${jmStatCard("Correction Assignment", taskCorrectionsPending, "Pending", taskCorrectionsDone, "Completed", ['var(--purple)','var(--bad)'])}
+      <div style="align-self:start">${jmStatCard("Correction Assignment", taskCorrectionsPending, "Pending", taskCorrectionsDone, "Completed", ['var(--purple)','var(--bad)'])}</div>
       <div class="adm-panel" style="margin:0">
         <div class="adm-panel-head">
           ${calendarMonthYearPickerHtml(adminCalYear, adminCalMonth)}
@@ -8139,19 +8239,19 @@ function clientPaymentPlan(c){
     const reg = pays.reg || {};
     const regAmt = parseFloat(reg.amount) || 0;
     if(reg.status === "paid" || regAmt > 0)
-      items.push({label: PAY_LABELS.reg, amount: regAmt, paid: reg.status === "paid", date: reg.date || ""});
+      items.push({key: "reg", label: PAY_LABELS.reg, amount: regAmt, paid: reg.status === "paid", date: reg.date || ""});
     activePayKeys(c).filter(k=>k !== "reg").forEach(k=>{
       const p = pays[k];
       if(p && p.status === "paid")
-        items.push({label: PAY_LABELS[k], amount: parseFloat(p.amount) || 0, paid: true, date: p.date || ""});
+        items.push({key: k, label: PAY_LABELS[k], amount: parseFloat(p.amount) || 0, paid: true, date: p.date || ""});
     });
     inst.forEach(it=>items.push({label: it.title, amount: parseFloat(it.amount) || 0,
-                                 paid: it.status === "paid", date: it.paidDate || ""}));
+                                 paid: it.status === "paid", date: it.paidDate || "", installment: true}));
   } else {
     activePayKeys(c).forEach(k=>{
       const p = pays[k] || {};
       const paid = p.status === "paid";
-      items.push({label: PAY_LABELS[k], amount: paid ? (parseFloat(p.amount) || 0) : (suggestedAmount(c, k) || 0),
+      items.push({key: k, label: PAY_LABELS[k], amount: paid ? (parseFloat(p.amount) || 0) : (suggestedAmount(c, k) || 0),
                   paid, date: p.date || ""});
     });
   }
@@ -8166,6 +8266,35 @@ function clientPaymentPlan(c){
   const fullyPaid = contract > 0 ? due < 0.5 : (count > 0 && paidCount === count);
   return {items, count, paidCount, paidAmt, total: contract, due, unscheduled: hasUnscheduled ? unscheduled : 0,
           fullyPaid, singlePayment: fullyPaid && paidCount === 1, legacy};
+}
+// Can the current login see this client's money? Managers/Accounts/Admin always can;
+// BDC staff (shared BDC login, or an individual "BDC Login") can for every client the
+// server sent with its payment data — i.e. their own leads.
+function clientMoneyVisible(c){
+  if(!c) return false;
+  if(canSeeMoney()) return true;
+  return isTelecaller() && !!c.payments;
+}
+// Compact "Total · Paid · Pending + split-up" block, used on the BDC client rows,
+// the BDC drawer and the project Payment tab.
+function paymentSummaryHtml(c, opts){
+  opts = opts || {};
+  if(!clientMoneyVisible(c)) return "";
+  const plan = clientPaymentPlan(c);
+  if(!plan.total && !plan.items.length)
+    return `<div style="font-size:12px;color:var(--muted);margin-top:6px">Payment: total amount not entered yet</div>`;
+  const money = n => "Rs. " + (Number(n)||0).toLocaleString("en-IN");
+  const head = `<div style="font-size:12.5px;margin-top:6px;display:flex;flex-wrap:wrap;gap:6px 14px">
+      <span>Total: <b>${money(plan.total)}</b></span>
+      <span>Paid: <b style="color:#0E7A4F">${money(plan.paidAmt)}</b></span>
+      <span>Pending: <b style="color:${plan.due>=0.5?'#B42318':'#0E7A4F'}">${money(plan.due)}</b></span>
+      <span class="badge ${plan.fullyPaid?'b-paid':'b-dim'}">${plan.fullyPaid?'&#10003; Paid in full':(plan.paidCount+"/"+plan.count+" paid")}</span>
+    </div>`;
+  if(opts.compact) return head;
+  const chips = plan.items.map(it=>`<span class="badge ${it.paid?'b-paid':'b-dim'}" style="font-weight:600">${esc(it.label)}: ${money(it.amount)} ${it.paid?'&#10003;':'&middot; pending'}</span>`);
+  if(plan.unscheduled) chips.push(`<span class="badge b-wait" style="font-weight:600">Not yet split: ${money(plan.unscheduled)}</span>`);
+  return head + (chips.length ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">
+      ${c.installmentPlanName?`<span style="font-size:12px;color:var(--muted);align-self:center">${esc(c.installmentPlanName)}:</span>`:""}${chips.join("")}</div>` : "");
 }
 function admInstallmentsText(c){
   const plan = clientPaymentPlan(c);
@@ -8458,8 +8587,10 @@ function renderAdminProjectDetail(){
   // Employees (Programmers/Paper Writers/Journal team) get the same tabbed project view as
   // Admin/Technical Manager/TL, minus the Payment Information tab — that stays limited to
   // roles covered by canSeeMoney().
-  const projTabs = (role==="employee" ? PROJ_TABS.filter(t=>t.key!=="payment") : PROJ_TABS);
-  if(role==="employee" && admProjTab==="payment") admProjTab = "dashboard";
+  // Exception: BDC staff see the Payment tab on their own leads (the server sends those with payments).
+  const hidePay = role==="employee" && !clientMoneyVisible(c);
+  const projTabs = (hidePay ? PROJ_TABS.filter(t=>t.key!=="payment") : PROJ_TABS);
+  if(hidePay && admProjTab==="payment") admProjTab = "dashboard";
   if(!projTabs.some(t=>t.key===admProjTab)) admProjTab = "dashboard";
   const tabsHtml = projTabs.map(t=>`<button class="adm-tab ${admProjTab===t.key?'active':''}" onclick="admSetProjTab(${jsq(t.key)})">${esc(t.label)}</button>`).join("");
   let body = "";
@@ -8764,16 +8895,19 @@ function admProjExtensionsTab(c){
 function admProjPaymentTab(c){
   const rows = activePayKeys(c).filter(k=>k==="reg").map(k=>{
     const p = c.payments[k]||{};
-    return `<tr><td><b>${esc(PAY_LABELS[k])}</b></td><td>${p.status==='paid'?'<span class="adm-status good">Paid</span>':'<span class="adm-status warn">Pending</span>'}</td><td>${p.amount?('Rs. '+esc(p.amount)):'—'}</td><td>${p.date?fmtDate(p.date):'—'}</td><td>${p.status==='paid'?paymentProofLinkHtml(c.id, PAY_LABELS[k]):'—'}</td></tr>`;
+    return `<tr><td><b>${esc(PAY_LABELS[k])}</b></td><td>${p.status==='paid'?'<span class="adm-status good">Paid</span>':'<span class="adm-status warn">Pending</span>'}</td><td>${p.amount?('Rs. '+esc(p.amount)):'—'}</td><td>${p.date?fmtDate(p.date):'—'}</td><td>${p.status==='paid'?paymentProofLinkHtml(c.id, PAY_LABELS[k])
+      :(isTelecaller()?`<button class="btn small" onclick="openPayModal(${jsq(c.id)},${jsq(k)})">Mark as paid</button>`:'—')}</td></tr>`;
   }).join("");
-  return `<div class="adm-panel"><div class="adm-panel-head"><h3>Payment information</h3><span class="badge b-purp">Rs. ${c.totalAmount||0} total</span></div>
+  const plan = clientPaymentPlan(c);
+  return `<div class="adm-panel"><div class="adm-panel-head"><h3>Payment information</h3><span class="badge b-purp">Rs. ${plan.total.toLocaleString("en-IN")} total</span></div>
+    <div class="adm-panel-body" style="padding-bottom:4px">${paymentSummaryHtml(c)}</div>
     <div class="adm-table-wrap"><table class="adm-table"><thead><tr><th>Stage</th><th>Status</th><th>Amount</th><th>Date</th><th>Proof</th></tr></thead><tbody>${rows}</tbody></table></div>
   </div>${admInstallmentPlanHtml(c)}`;
 }
 function admInstallmentPlanHtml(c){
   const items = c.installments||[];
-  const canPay = ["telecaller","marketing_tl","marketing_manager","account_team","super_admin","md_admin"].includes(role);
-  const canEdit = ["telecaller","marketing_tl","marketing_manager","super_admin","md_admin"].includes(role);
+  const canPay = isTelecaller() || ["marketing_tl","marketing_manager","account_team","super_admin","md_admin"].includes(role);
+  const canEdit = isTelecaller() || ["marketing_tl","marketing_manager","super_admin","md_admin"].includes(role);
   if(!items.length && !canEdit) return "";
   const planTotal = items.reduce((s,it)=>s+(parseFloat(it.amount)||0),0);
   const regPaid = parseFloat((c.payments.reg||{}).amount)||0;
@@ -10653,7 +10787,38 @@ function admEmpInvolvedProjects(name){
     (c.demoScheduledEmp===name && c.demoScheduleStatus==="SCHEDULED")
   ));
 }
-function admEmpOngoingProjects(name){ return admEmpInvolvedProjects(name).filter(c=>c.stage!=="COMPLETED").length; }
+// "Ongoing" = this person's OWN part of the project is still open - not just "the project
+// isn't completed yet". E.g. once proofreading is approved and the paper moves to
+// formatting, it's no longer ongoing for the proofreading coordinator / proofreaders.
+const EMP_ACTIVE_STAGES = {
+  proposal:     ["PROPOSAL_ASSIGNED"],
+  programmers:  ["IMPLEMENTATION_ASSIGNED"],
+  writers:      ["PAPERWRITER_ASSIGNED","WRITER_FIXING","PROOFREAD_CORRECTION"],
+  contentCoord: ["COORDINATOR_REVIEW"],
+  proofCoord:   ["PROOFREAD_COORD_ASSIGNED","PROOFREADING","PROOFREAD_RECHECK"],
+  proofreaders: ["PROOFREADING","PROOFREAD_RECHECK"],
+  formatCoord:  ["FORMATTING_ASSIGNED","FORMATTING_IN_PROGRESS"],
+  formatters:   ["FORMATTING_IN_PROGRESS"],
+  submission:   ["SUBMISSION"],
+};
+function admEmpPartActive(c, name){
+  if(c.stage==="COMPLETED" || c.rejected) return false;
+  const has = (list, key) => (list||[]).includes(name) && EMP_ACTIVE_STAGES[key].includes(c.stage);
+  if(c.proposalWriter===name && EMP_ACTIVE_STAGES.proposal.includes(c.stage)) return true;
+  if(has(c.assignedProgrammers,"programmers") || has(c.assignedWriters,"writers")) return true;
+  if(c.coordinatorName===name && EMP_ACTIVE_STAGES.contentCoord.includes(c.stage)) return true;
+  if(c.proofreadCoordinator===name && EMP_ACTIVE_STAGES.proofCoord.includes(c.stage)) return true;
+  if(has(c.assignedProofreaders,"proofreaders") || has(c.assignedFormatters,"formatters")) return true;
+  if(c.formatCoordinator===name && EMP_ACTIVE_STAGES.formatCoord.includes(c.stage)) return true;
+  if(c.submissionPerson===name && EMP_ACTIVE_STAGES.submission.includes(c.stage)) return true;
+  if(c.demoScheduledEmp===name && c.demoScheduleStatus==="SCHEDULED") return true;
+  // The client's technical person stays on it while it's with the Technical team.
+  if(c.technicalPerson===name && stageIdx(c.stage) < stageIdx("JOURNAL_MANAGER_REVIEW")) return true;
+  // Any unfinished task for this client assigned to them.
+  return tasks.some(t=>t.client_id===c.id && t.status!=="COMPLETED"
+    && (t.assigned_to||"").split(",").map(x=>x.trim()).includes(name));
+}
+function admEmpOngoingProjects(name){ return admEmpInvolvedProjects(name).filter(c=>admEmpPartActive(c, name)).length; }
 function matchesTeamSearch(e){
   const s = admTeamColSearch;
   if(s.name && !(e.name||"").toLowerCase().includes(s.name.toLowerCase())) return false;
@@ -10908,7 +11073,8 @@ function renderTeamMemberProfile(){
   }
   const roleLabel = EMP_ROLE_LABEL[dirEmp.teamType]||EMP_ROLE_LABEL[dirEmp.role]||dirEmp.role;
   const involvedProjects = admEmpInvolvedProjects(dirEmp.name);
-  const completedProjects = involvedProjects.filter(c=>c.stage==="COMPLETED").length;
+  // Their part is finished (the project itself may still be with another team).
+  const completedProjects = involvedProjects.filter(c=>!admEmpPartActive(c, dirEmp.name)).length;
   const involvedTasks = tasks.filter(t=>(t.assigned_to||"").split(",").map(s=>s.trim()).includes(dirEmp.name));
   const completedTasks = involvedTasks.filter(t=>t.status==="COMPLETED").length;
   const now = new Date();
@@ -11247,23 +11413,20 @@ function clientJournalBlockHtml(c){
   return "";
 }
 // Next pending payment (in the fixed PAY_KEYS order), or null if everything's paid.
+// Built from the client's REAL plan (agreed Total amount + Registration + the split-up
+// installments) — not the service's default stage list, which used to show e.g.
+// Rs. 75,000 / Rs. 50,000 pending for a client whose whole contract was Rs. 25,000.
 function clientNextPayment(c){
-  const keys = activePayKeys(c);
-  for(const k of keys){
-    if(c.payments[k].status!=='paid') return {key:k, label:PAY_LABELS[k], amount: suggestedAmount(c,k)};
-  }
+  const plan = clientPaymentPlan(c);
+  const next = plan.items.find(it=>!it.paid);
+  if(next) return {key:next.key||"", label:next.label, amount:next.amount};
+  if(plan.unscheduled) return {key:"", label:"Remaining balance", amount:plan.unscheduled};
   return null;
 }
 function clientPaymentTotals(c){
-  const keys = activePayKeys(c);
-  let total=0, paid=0, pending=0;
-  keys.forEach(k=>{
-    const p = c.payments[k];
-    const amt = p.status==='paid' ? (parseFloat(p.amount)||0) : (suggestedAmount(c,k)||0);
-    total += amt;
-    if(p.status==='paid') paid += (parseFloat(p.amount)||0); else pending += amt;
-  });
-  return {total, paid, pending};
+  const plan = clientPaymentPlan(c);
+  return {total: plan.total, paid: plan.paidAmt, pending: plan.due,
+          remaining: plan.count - plan.paidCount, plan};
 }
 function inr(n){ return "Rs. " + (Number(n)||0).toLocaleString("en-IN"); }
 // Next upcoming date this client should know about — a follow-up call our telecaller logged.
@@ -11298,7 +11461,7 @@ function renderClientOverview(c){
       <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Paid: <b style="color:var(--ok)">${inr(totals.paid)}</b></span><span>Total: <b>${inr(totals.total)}</b></span></div>
       <div class="pay-progress-wrap">
         <div class="pay-progress-track"><div class="pay-progress-fill" style="width:${pct}%"></div></div>
-        <div class="pay-progress-meta"><span>${pct}% collected</span><span>${activePayKeys(c).filter(k=>c.payments[k].status!=='paid').length} installment(s) remaining</span></div>
+        <div class="pay-progress-meta"><span>${pct}% collected</span><span>${totals.remaining>0 ? totals.remaining+" installment(s) remaining" : "No dues — paid in full"}</span></div>
       </div>
       <button class="btn ghost small" onclick="setClientView('payments')">View full payment schedule &#8594;</button>
     </div>
@@ -11361,21 +11524,23 @@ function renderClientPayments(c){
   $("statsRow").innerHTML = `
     <div class="stat"><span>Total Contract</span><b>${inr(totals.total)}</b></div>
     <div class="stat goldline"><span>Paid</span><b style="color:var(--ok)">${inr(totals.paid)}</b><span>${totals.total>0?Math.round((totals.paid/totals.total)*100):0}% collected</span></div>
-    <div class="stat ${totals.pending>0?'badline':''}"><span>${overdue&&totals.pending>0?'Overdue':'Pending'}</span><b>${inr(totals.pending)}</b>${totals.pending>0?`<span style="color:${overdue?'var(--bad)':'var(--warn)'}">${overdue?'Action required':'Not yet due'}</span>`:""}</div>`;
-  const keys = activePayKeys(c);
-  const rows = keys.map((k,i)=>{
-    const p = c.payments[k];
-    const amt = p.status==='paid' ? (parseFloat(p.amount)||0) : (suggestedAmount(c,k)||0);
-    const statusBadge = p.status==='paid' ? `<span class="badge b-paid">&#10003; Paid</span>`
+    <div class="stat ${totals.pending>0?'badline':''}"><span>${overdue&&totals.pending>0?'Overdue':'Pending'}</span><b>${inr(totals.pending)}</b>${totals.pending>0?`<span style="color:${overdue?'var(--bad)':'var(--warn)'}">${overdue?'Action required':'Not yet due'}</span>`:`<span style="color:var(--ok)">No dues — paid in full</span>`}</div>`;
+  const plan = totals.plan;
+  const lines = plan.items.slice();
+  if(plan.unscheduled) lines.push({label:"Remaining balance", amount:plan.unscheduled, paid:false, date:""});
+  const rows = lines.map((it,i)=>{
+    const statusBadge = it.paid ? `<span class="badge b-paid">&#10003; Paid</span>`
       : (overdue ? `<span class="badge b-bad">Overdue</span>` : `<span class="badge b-wait">Pending</span>`);
+    // Itemised service breakdown only where one was actually added.
+    const hasBreakdown = it.key && c.serviceItems && (c.serviceItems[it.key]||[]).length;
     return `<tr>
       <td>${i+1}</td>
-      <td><b>${esc(PAY_LABELS[k])}</b>${serviceBreakdownHtml(c,k,false)}</td>
-      <td>${inr(amt)}</td>
-      <td>${p.status==='paid' ? fmtDate(p.date) : (overdue?"Overdue":fmtDate(c.deadlineDate))}</td>
+      <td><b>${esc(it.label)}</b>${hasBreakdown ? serviceBreakdownHtml(c,it.key,false) : ""}</td>
+      <td>${inr(it.amount)}</td>
+      <td>${it.paid ? fmtDate(it.date) : (overdue?"Overdue":fmtDate(c.deadlineDate))}</td>
       <td>${statusBadge}</td>
     </tr>`;
-  }).join("");
+  }).join("") || `<tr><td colspan="5" style="color:var(--muted)">Your payment schedule hasn't been set up yet.</td></tr>`;
   $("content").innerHTML = `
     <div class="panel" style="padding:20px">
       <h3 style="margin-bottom:14px">Payment Schedule</h3>
@@ -11793,7 +11958,7 @@ function openDrawer(id){
       ${c.extRequested && c.extTarget==='project' ? `<div class="pc-meta" style="color:var(--gold)">Extension requested (${esc(c.extAmount)}) &mdash; waiting on Marketing TL/Manager.</div>`
         : `<button class="btn ghost small" onclick="openExtensionModal(${jsq(c.id)},'project')">Request deadline extension</button>`}
     </div>` : ""}
-    ${seeMoney ? `<div class="sec" style="margin-top:14px"><h4>Payments</h4>${payHtml}</div>` : ""}
+    ${seeMoney ? `<div class="sec" style="margin-top:14px"><h4>Payments</h4>${paymentSummaryHtml(c, {compact:true})}<div style="margin-top:10px">${payHtml}</div></div>` : ""}
     ${seeMoney ? installmentHtml : ""}
     ${drawerReferralsHtml(c)}
     <div class="sec"><h4>Conversations ${isTelecaller()?`<button class="btn ghost small" style="float:right" onclick="openCallModal(${jsq(c.id)})">+ Log call</button>`:""}</h4>${callsHtml}</div>
@@ -13161,13 +13326,36 @@ async function addCall(id){
   toast("Call saved");
 }
 
+// One-tap answers for the work-update popup, so a programmer / writer can just pick
+// how it went instead of typing. Tapping a choice fills the note; it can still be edited.
+const WORK_UPDATE_QUICK_NOTES = {
+  CODE_DELIVERED: ["Demo completed — client satisfied", "Demo completed over a call — client happy with progress",
+    "Demo completed in person", "Demo completed — client asked for small changes",
+    "Code and setup files shared with the client", "Demo completed — client not satisfied, rework needed"],
+  PAPER_DELIVERED: ["Paper delivered — client satisfied", "Paper explained over a call — client happy",
+    "Paper delivered — client asked for small changes", "Paper delivered — client not satisfied, rework needed"],
+  PROGRESS_NOTE: ["Work on track", "Waiting for client input", "Client informed of progress",
+    "Running slightly behind schedule"],
+};
 function openWorkUpdateModal(clientId, milestone){
   const label = MILESTONE_LABEL[milestone] || milestone;
+  const quick = WORK_UPDATE_QUICK_NOTES[milestone] || [];
   openModal(`
-    <h3>${label}</h3><p class="msub">${esc(findClient(clientId).name)} — add an optional note</p>
-    <div class="field"><label>Note</label><textarea id="wu_note" rows="3" placeholder="e.g. Demo shown over a call, client is happy with progress"></textarea></div>
+    <h3>${label}</h3><p class="msub">${esc(findClient(clientId).name)} — ${quick.length?"select an option (you can add a note too)":"add an optional note"}</p>
+    ${quick.length ? `<div class="field"><label>Select one</label>
+      <div class="wu-quick" role="radiogroup">${quick.map((q,i)=>
+        `<button type="button" class="wu-chip" role="radio" aria-checked="false" data-i="${i}" onclick="pickWorkUpdateNote(this)">${esc(q)}</button>`).join("")}</div></div>` : ""}
+    <div class="field"><label>Note ${quick.length?"(optional — edit or add more)":""}</label><textarea id="wu_note" rows="3" placeholder="e.g. Demo shown over a call, client is happy with progress"></textarea></div>
     <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button>
       <button class="btn" onclick="submitWorkUpdate(${jsq(clientId)},${jsq(milestone)})">Save update</button></div>`);
+}
+function pickWorkUpdateNote(btn){
+  const wrap = btn.closest(".wu-quick"), ta = $("wu_note");
+  const already = btn.classList.contains("on");
+  wrap.querySelectorAll(".wu-chip").forEach(b=>{ b.classList.remove("on"); b.setAttribute("aria-checked","false"); });
+  if(already){ ta.value = ""; return; }
+  btn.classList.add("on"); btn.setAttribute("aria-checked","true");
+  ta.value = btn.textContent;
 }
 async function submitWorkUpdate(clientId, milestone){
   const note = $("wu_note").value.trim();

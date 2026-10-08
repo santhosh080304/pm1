@@ -1,0 +1,137 @@
+CLIENT PORTAL PAYMENTS + BDC PAYMENT INFO — what changed
+=======================================================
+
+1) BUG FIX — Client Portal showed the wrong total (e.g. Rs. 75,000 instead of Rs. 25,000)
+   - Cause: the client's Payments page, Overview "Payment Progress" and "Next Payment" were
+     built from the service's DEFAULT stage list (Registration + Start Work 15k + Code 25k +
+     Paper 10k ...) and ignored the Total amount and split-up entered for that client.
+   - Now they use the client's real plan (same logic the staff dashboards already use):
+       Registration + the split-up installments entered for that client
+       (+ any stage payment Accounts recorded), against the agreed Total amount.
+       Any part of the total not split yet shows as one "Remaining balance" row.
+   - Example: Total 25,000, Registration 25,000 paid  ->  Total Contract Rs. 25,000,
+     Paid Rs. 25,000 (100%), Pending Rs. 0 "No dues — paid in full", one row: Registration.
+   - "No service breakdown added yet." is no longer printed under every row; a breakdown
+     only appears where one was actually added.
+   - Old clients with no Total amount and no split-up keep the old stage-based schedule.
+     So if a client still shows the default stages, their Total amount was never saved —
+     enter it in the client profile.
+   - The AI chat assistant no longer lists default stages (Start Work, Code, Paper) as
+     "pending" for clients who have a Total amount / split-up.
+
+2) BDC — client payment information now shown
+   - Every BDC client row (My leads, Already in the pipeline, Registered, Technical,
+     Accounts, pending lists) now shows:
+       Total | Paid | Pending | x/y paid (or "Paid in full")
+       + every split: Registration, each installment (paid / pending), and any balance
+       "Not yet split".
+   - Individual BDC staff (BDC Login) can now open the "Payment Information" tab on their
+     own leads (it was hidden because they were treated like programmers/writers). They can
+     mark Registration / installments as paid and add installments there — the server
+     already allowed this on their own leads.
+   - The BDC client drawer's Payments section now starts with the Total / Paid / Pending
+     summary.
+   - Leads that are not the BDC's own (sent without payment data by the server) show no
+     money, same as before.
+   - Fixed a crash risk: the BDC "Registered" and "Payment pending" lists read payments
+     on clients that the server sends without payment data.
+
+Files changed (1 + 2): index.html, ai_assistant.py.
+
+3) Marketing TL / Marketing Manager no longer see other teams' employees
+   - The "All Employees" board at the bottom of their dashboard is now "My Team — BDC"
+     and lists only BDC staff (Programmers, Paper Writers and Journal teams removed).
+   - Server: these two logins now receive full details only for BDC staff. Other teams
+     come through as name + role only (needed for picking who gives a client demo) -
+     no email, phone, date of birth, employee ID, branch etc.
+   - Opening another team's employee profile from those logins is blocked.
+   Files: index.html, server.py
+
+4) Work-assigned emails to employees no longer include client contact details
+   - Emails to Technical team members (programmers, paper writers, coordinators) and
+     Journal team members (proofreaders, formatters, coordinators, submission) no longer
+     contain the client's Phone, Email or overall Project deadline. They still get the
+     client name/ID, service, current stage, topic, domain, and (for tasks) the task's
+     own start and due dates.
+   - Covers all three automatic emails: "new work assigned to you", stage hand-off
+     "action needed", and "task assigned to you".
+   - BDC staff still receive the phone and email (they need them to call the client), and
+     department logins (Marketing, Accounts, Technical Manager...) are unchanged.
+   File: server.py
+
+5) "Work sent to you for review" email - client name, work number, attached document
+   - The email to the Coordinator / Technical TL / Technical Manager now shows:
+       Task    : Proposal writing
+       Client  : Santhosh (CL-1001)
+       Work    : Work 2 of 2 — IEEE Paper     (same numbering as the work badges in the app)
+       Document: Proposal_Santhosh.pdf (attached)
+     and the client name is in the subject line.
+   - The proposal / paper the employee attached when sending the work is now attached to
+     the email itself (it was only saved in the app before).
+   - Email sending can now carry attachments (Gmail API uses Google's upload endpoint for
+     these; SMTP works as before). Anything over ~18 MB in total isn't attached - the email
+     says to open it from the dashboard instead.
+   File: server.py
+
+6) Sidebar scrolls + white strip at the bottom fixed (all dashboards, desktop)
+   - Long menus (e.g. Technical Manager) now scroll inside the dark sidebar. Before, the
+     bottom items (Dark mode / Log out) spilled out below the sidebar onto a white
+     background and were cut off.
+   File: index.html
+
+7) "Code delivered" / "Paper delivered" / "Progress note" popup - one-tap options
+   - The popup now lists ready answers to just select, e.g. "Demo completed — client
+     satisfied", "Demo completed over a call — client happy with progress", "Demo completed
+     — client asked for small changes", "Demo completed — client not satisfied, rework
+     needed". Tapping one fills the note (tap again to clear); the note can still be edited
+     or typed freely.
+   - To change the list, edit WORK_UPDATE_QUICK_NOTES in index.html.
+   File: index.html
+
+8) Journal Manager / TL can assign Proofreaders, Formatters and Submission people directly
+   - "New work needing assignment" -> Assign to: the list now shows the Proofreaders (or
+     Formatters) themselves - tick one or more - plus the coordinators as an optional
+     extra (max one).
+       * Team members picked  -> work starts straight away (Proofreading / Formatting in
+                                 progress) and they get the "new work assigned" email.
+       * Only a coordinator   -> old flow: the coordinator picks the team.
+       * Both                 -> team starts now, the coordinator still reviews.
+   - A proofreader assigned without a coordinator now has "Approve & send to Journal
+     Manager" / "Send correction to writer" on their dashboard, and re-checks the writer's
+     corrected paper. A formatter assigned without a coordinator has "Approve & forward"
+     (goes to the Journal Manager's final review) / "Request correction".
+   - Formatting final review: new "Assign submission to" choice (default: whole Submission
+     team). The chosen person gets the paper, the email and the reminder; other Submission
+     members see it under "Assigned to other team members".
+   - Pop-up reminders and emails follow the person actually assigned.
+   Files: index.html, server.py (no database changes - existing columns are used)
+
+9) Team list "Ongoing Project" count fixed
+   - It used to count every client a person had ever worked on until the WHOLE project
+     reached "Completed" - so e.g. a proofreading coordinator still showed 1 after
+     proofreading was approved and the paper moved on to formatting.
+   - Now a project is "ongoing" for someone only while their own part is open:
+       proposal writer    - proposal being written
+       programmers        - implementation in progress
+       paper writers      - writing / fixing corrections
+       content coordinator- paper review
+       proofreading coord - coordinator assigned / proofreading / re-check
+       proofreaders       - proofreading / re-check
+       formatting coord   - formatting assigned / in progress
+       formatters         - formatting in progress
+       submission person  - waiting to be submitted
+     plus a scheduled demo, or any unfinished task on that client assigned to them.
+   - Same rule in the Export (CSV) and in the member profile's "x completed" figure.
+   File: index.html
+
+10) Dashboard boxes now use the Technical Manager box design everywhere
+   - Journal Manager / Journal TL dashboard (Publications, Pending Actions, Journals),
+     every Journal team employee dashboard (proofreaders, formatters, coordinators,
+     submission) and every Technical team employee dashboard (programmers, paper writers)
+     now draw their stat boxes exactly like the Technical Manager's: title, big "X / Y",
+     the two labels, a progress bar and a short note.
+   - The "My Proofreading / My Formatting / Demo Pending ..." panels use the same header.
+   - "Correction Assignment" box no longer stretches to the calendar's height.
+   - Journal Manager "Journals" box could show a negative number (e.g. "0 / -1") - fixed:
+     it now shows Still pending / In journal pipeline.
+   File: index.html

@@ -21,6 +21,8 @@ import zlib
 import xml.etree.ElementTree as ET
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders as _email_encoders
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -2961,7 +2963,9 @@ def _reminder_emp_match(con, rule, c, sess, creator_cache):
     if rule == "coordinator":
         return (c["coordinator_name"] or "").strip() == name
     if rule == "proofread_coordinator":
-        return (c["proofread_coordinator"] or "").strip() == name
+        if (c["proofread_coordinator"] or "").strip():
+            return (c["proofread_coordinator"] or "").strip() == name
+        return name in _csv_names(c["assigned_proofreaders"])     # assigned without a coordinator
     if rule == "proofreaders":
         people = _csv_names(c["assigned_proofreaders"]) or _csv_names(c["proofread_coordinator"])
         return name in people
@@ -2970,7 +2974,10 @@ def _reminder_emp_match(con, rule, c, sess, creator_cache):
     if rule == "formatting_team":
         return name in (_csv_names(c["assigned_formatters"]) | _csv_names(c["format_coordinator"]))
     if rule == "submission_team":
-        return emp_role == "JOURNAL_EMPLOYEE" and team == "SUBMISSION"
+        if emp_role != "JOURNAL_EMPLOYEE" or team != "SUBMISSION":
+            return False
+        chosen = (c["submission_person"] or "").strip()
+        return not chosen or chosen == name       # the person the Journal Manager picked, else the whole team
     return False
 
 
@@ -3149,6 +3156,7 @@ ASSIGNMENT_COLUMNS = {
     "assigned_proofreaders": "Proofreading",
     "format_coordinator": "Formatting coordinator",
     "assigned_formatters": "Formatting",
+    "submission_person": "Journal submission",
 }
 
 HANDOFF_TARGET_ROLES = {"TECH_TL": ("technical_tl",), "TECH_MANAGER": ("technical_manager",)}
@@ -3196,6 +3204,16 @@ def employee_email_map(con, names_):
         if r["name"] in names_:
             out[r["name"]] = (r["email"] or "").strip()
     return out
+
+
+def employee_role_map(con, names_):
+    """name -> employee role (PROGRAMMER, PAPER_WRITER, JOURNAL_EMPLOYEE, TELECALLER...)."""
+    names_ = {n.strip() for n in names_ if n and n.strip()}
+    if not names_:
+        return {}
+    return {r["name"]: (r["role"] or "") for r in con.execute(
+        """SELECT name, role FROM employees WHERE deleted_at IS NULL AND active=1""").fetchall()
+        if r["name"] in names_}
 
 
 # =====================================================================
@@ -3303,7 +3321,13 @@ def _gmail_access_token():
         return _GMAIL_TOKEN["value"]
 
 
-def _build_message(to_list, subject, body, cc_list=None, html=None):
+# Gmail rejects messages over 25 MB; base64 inflates attachments by ~4/3, so stay well under.
+MAIL_MAX_ATTACH_BYTES = 18 * 1024 * 1024
+
+
+def _build_message(to_list, subject, body, cc_list=None, html=None, attachments=None):
+    """attachments: list of {"name", "type", "data"(base64)} - e.g. the proposal / paper
+    an employee sent for review."""
     from email.utils import formataddr
     from email.header import Header
     if html:
@@ -3312,6 +3336,25 @@ def _build_message(to_list, subject, body, cc_list=None, html=None):
         msg.attach(MIMEText(str(html)[:200000], "html", "utf-8"))
     else:
         msg = MIMEText(str(body)[:20000], "plain", "utf-8")
+    if attachments:
+        outer = MIMEMultipart("mixed")
+        outer.attach(msg)
+        for a in attachments:
+            try:
+                raw = base64.b64decode(a.get("data") or "")
+            except Exception:
+                continue
+            if not raw:
+                continue
+            ctype = (a.get("type") or "application/octet-stream").strip()
+            maintype, _, subtype = ctype.partition("/")
+            part = MIMEBase(maintype or "application", subtype or "octet-stream")
+            part.set_payload(raw)
+            _email_encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment",
+                            filename=("utf-8", "", a.get("name") or "document"))
+            outer.attach(part)
+        msg = outer
     msg["Subject"] = str(Header(subject, "utf-8"))
     sender = mail_sender()
     msg["From"] = formataddr((str(Header(MAIL_FROM_NAME, "utf-8")), sender)) if MAIL_FROM_NAME else sender
@@ -3323,6 +3366,18 @@ def _build_message(to_list, subject, body, cc_list=None, html=None):
 
 def _send_gmail_api(msg):
     token = _gmail_access_token()
+    if msg.is_multipart() and msg.get_content_type() == "multipart/mixed":
+        # Has attachments: the media-upload endpoint takes the raw message (up to 35 MB),
+        # unlike the JSON endpoint below, which is only meant for small messages.
+        req = Request("https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media",
+                      data=msg.as_bytes(), method="POST",
+                      headers={"Authorization": "Bearer " + token, "Content-Type": "message/rfc822"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            raise RuntimeError("HTTP %s: %s" % (e.code, e.read().decode("utf-8", "replace")[:300]))
+        return
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
     _http_json("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {"raw": raw},
                headers={"Authorization": "Bearer " + token})
@@ -3356,7 +3411,7 @@ def _send_smtp(msg, rcpts):
                        % (last,))
 
 
-def deliver_mail(to_list, subject, body, cc_list=None, html=None, note=""):
+def deliver_mail(to_list, subject, body, cc_list=None, html=None, note="", attachments=None):
     """Send now (blocking). Returns (ok, error_message)."""
     to_list = [t.strip() for t in (to_list or []) if t and EMAIL_RE.match(t.strip())]
     cc_list = [t.strip() for t in (cc_list or []) if t and EMAIL_RE.match(t.strip()) and t.strip() not in to_list]
@@ -3374,7 +3429,7 @@ def deliver_mail(to_list, subject, body, cc_list=None, html=None, note=""):
         mail_log(to_list, subject, False, method, err, note)
         return False, err
     try:
-        msg = _build_message(to_list, subject, body, cc_list, html)
+        msg = _build_message(to_list, subject, body, cc_list, html, attachments)
         if method == "gmail_api":
             _send_gmail_api(msg)
         else:
@@ -3386,14 +3441,14 @@ def deliver_mail(to_list, subject, body, cc_list=None, html=None, note=""):
     return True, ""
 
 
-def send_mail_async(to_list, subject, body, cc_list=None, note=""):
+def send_mail_async(to_list, subject, body, cc_list=None, note="", attachments=None):
     """Send in a background thread so the button the user clicked never waits on
     the mail server. The result (sent or the exact error) goes to the mail log."""
     to_list = [t for t in (to_list or []) if EMAIL_RE.match(t or "")]
     if not mail_method() or not to_list:
         return False
     threading.Thread(target=deliver_mail, args=(to_list, subject, body, cc_list),
-                     kwargs={"note": note}, daemon=True).start()
+                     kwargs={"note": note, "attachments": attachments or None}, daemon=True).start()
     return True
 
 
@@ -3410,34 +3465,42 @@ class _Outbox:
         self.default_to = (get_settings(con).get("toEmail") or "").strip()
         self.items = {}      # key -> {"name", "email", "subject", "sections", "cc"}
 
-    def _add(self, key, display, email, subject, section, cc=()):
+    def _add(self, key, display, email, subject, section, cc=(), attachments=()):
         missing = not email
         email = email or self.default_to
         if not email:
             self.items.setdefault(key, {"name": display, "email": "", "missing": True,
-                                        "subject": subject, "sections": [], "cc": set()})
+                                        "subject": subject, "sections": [], "cc": set(), "files": []})
             return
         if email.lower() == self.actor_email:
             return                       # don't mail people about what they just did themselves
         it = self.items.setdefault(key, {"name": display, "email": email, "missing": missing,
-                                         "subject": subject, "sections": [], "cc": set()})
+                                         "subject": subject, "sections": [], "cc": set(), "files": []})
         if section not in it["sections"]:
             it["sections"].append(section)
+        for a in attachments or ():
+            if a not in it["files"]:
+                it["files"].append(a)
         it["cc"].update(c for c in cc if c and c.lower() != email.lower())
 
-    def to_role(self, role, subject, section, cc_roles=()):
+    def to_role(self, role, subject, section, cc_roles=(), attachments=()):
         cc = [self.role_emails.get(r, "") for r in cc_roles]
         self._add("role:" + role, ROLE_EMAIL_LABELS.get(role, role), self.role_emails.get(role, ""),
-                  subject, section, cc)
+                  subject, section, cc, attachments)
         if "role:" + role in self.items:
             self.items["role:" + role]["is_role"] = True
 
-    def to_employees(self, names_, subject, section):
+    def to_employees(self, names_, subject, section, staff_section=None, attachments=()):
+        """staff_section: the same message WITHOUT the client's phone / email, sent to
+        Technical (programmers, writers) and Journal team members. BDC staff
+        (TELECALLER) still get `section`, since calling the client is their job."""
         emails = employee_email_map(self.con, names_)
+        roles = employee_role_map(self.con, names_) if staff_section is not None else {}
         for n in names_:
             n = (n or "").strip()
             if n:
-                self._add("emp:" + n, n, emails.get(n, ""), subject, section)
+                sec = section if (staff_section is None or roles.get(n) == "TELECALLER") else staff_section
+                self._add("emp:" + n, n, emails.get(n, ""), subject, sec, (), attachments)
 
     def flush(self):
         sent, missing = [], []
@@ -3457,7 +3520,15 @@ class _Outbox:
                    "\nPlease check your iMatiz dashboard.\n"
             body = head + "\n\n".join(it["sections"]) + "\n" + link + "\nRegards,\niMatiz Technology"
             subject = it["subject"] if len(it["sections"]) == 1 else "iMatiz: %d updates for you" % len(it["sections"])
-            if configured and send_mail_async([it["email"]], subject, body, sorted(it["cc"])):
+            files, size = [], 0
+            for a in it.get("files") or []:
+                n = len(a.get("data") or "") * 3 // 4
+                if size + n > MAIL_MAX_ATTACH_BYTES:
+                    body += "\n(%s is too large to attach - open it from the dashboard.)" % a.get("name")
+                    continue
+                files.append(a)
+                size += n
+            if configured and send_mail_async([it["email"]], subject, body, sorted(it["cc"]), attachments=files):
                 sent.append({"name": it["name"], "email": it["email"], "cc": sorted(it["cc"])})
             else:
                 sent_to = {"name": it["name"], "email": it["email"], "cc": sorted(it["cc"]),
@@ -3469,17 +3540,34 @@ class _Outbox:
                 "missing": missing} if (sent or missing) else None
 
 
-def _client_lines(c):
+def _client_lines(c, contact=True):
+    """Client summary for notification emails. contact=False leaves out the client's
+    phone number, email address and the client's overall project deadline (used for
+    Technical / Journal team members - their own task carries its own due date)."""
     svc = SERVICES.get(c["service_key"] or "", {}).get("label", c["service_key"] or "-") \
         if "service_key" in c.keys() else "-"
-    rows = [("Client", "%s (%s)" % (c["name"], c["id"])), ("Service", svc),
-            ("Phone", c["phone"] or "-"), ("Email", c["email"] or "-"),
-            ("Project deadline", c["deadline_date"] or "-"),
-            ("Current stage", STAGE_LABELS.get(c["stage"], c["stage"]))]
+    rows = [("Client", "%s (%s)" % (c["name"], c["id"])), ("Service", svc)]
+    if contact:
+        rows += [("Phone", c["phone"] or "-"), ("Email", c["email"] or "-"),
+                 ("Project deadline", c["deadline_date"] or "-")]
+    rows += [("Current stage", STAGE_LABELS.get(c["stage"], c["stage"]))]
     for col in ("topic", "domain"):
         if col in c.keys() and (c[col] or "").strip():
             rows.append((col.title(), c[col]))
     return "\n".join("%-17s: %s" % r for r in rows)
+
+
+def _work_label(con, c):
+    """'Work 2 of 3 — SCI Paper': which of this client's works (same Client ID) it is,
+    in the same order the app numbers them (registration date, then id)."""
+    did = c["display_id"] or c["id"]
+    fam = con.execute("""SELECT id, reg_date FROM clients
+                         WHERE COALESCE(NULLIF(display_id,''), id)=?""", (did,)).fetchall()
+    fam = sorted(fam, key=lambda r: (str(r["reg_date"] or ""), str(r["id"])))
+    pos = next((i + 1 for i, r in enumerate(fam) if r["id"] == c["id"]), 1)
+    svc = SERVICES.get(c["service_key"] or "", {}).get("label", c["service_key"] or "") \
+        if "service_key" in c.keys() else ""
+    return "Work %d of %d%s" % (pos, max(len(fam), 1), (" — " + svc) if svc else "")
 
 
 def _snapshot(con, d):
@@ -3520,13 +3608,16 @@ def _stage_recipients(con, c):
     elif emp_rule == "coordinator":
         people = [c.get("coordinator_name")] if c.get("coordinator_name") else []
     elif emp_rule == "proofread_coordinator":
-        people = sorted(_csv_names(c.get("proofread_coordinator")))
+        # Assigned straight to proofreaders (no coordinator): the proofreaders re-check.
+        people = sorted(_csv_names(c.get("proofread_coordinator")) or _csv_names(c.get("assigned_proofreaders")))
     elif emp_rule == "proofreaders":
         people = sorted(_csv_names(c.get("assigned_proofreaders")) or _csv_names(c.get("proofread_coordinator")))
     elif emp_rule == "format_coordinator":
         people = sorted(_csv_names(c.get("format_coordinator")))
     elif emp_rule == "formatting_team":
         people = sorted(_csv_names(c.get("assigned_formatters")) | _csv_names(c.get("format_coordinator")))
+    elif emp_rule == "submission_team" and (c.get("submission_person") or "").strip():
+        people = [c["submission_person"].strip()]
     elif emp_rule == "submission_team":
         people = [r["name"] for r in con.execute(
             """SELECT name FROM employees WHERE role='JOURNAL_EMPLOYEE' AND team_type='SUBMISSION'
@@ -3552,6 +3643,7 @@ def collect_notifications(con, action, d, before):
         new_c = dict(r) if r else None
         if new_c:
             block = _client_lines(r)
+            staff_block = _client_lines(r, contact=False)
             just_assigned = set()
             for col, label in ASSIGNMENT_COLUMNS.items():
                 if col not in new_c:
@@ -3561,7 +3653,8 @@ def collect_notifications(con, action, d, before):
                     just_assigned.update(added)
                     box.to_employees(
                         added, "iMatiz: new work assigned to you — %s" % new_c["name"],
-                        "%s assigned you: %s.\n\n%s" % (actor, label, block))
+                        "%s assigned you: %s.\n\n%s" % (actor, label, block),
+                        "%s assigned you: %s.\n\n%s" % (actor, label, staff_block))
             if new_c["stage"] != old_c["stage"]:
                 roles, people, what = _stage_recipients(con, new_c)
                 last = con.execute("""SELECT note FROM history WHERE client_id=?
@@ -3569,14 +3662,16 @@ def collect_notifications(con, action, d, before):
                 note = ((last["note"] or "").strip() if last else "")
                 subject = "iMatiz: [%s] %s — action needed" % (
                     STAGE_LABELS.get(new_c["stage"], new_c["stage"]), new_c["name"])
-                section = "%s moved this client to: %s.\nYour next step: %s.\n%s\n%s" % (
-                    actor, STAGE_LABELS.get(new_c["stage"], new_c["stage"]), what or "-",
-                    ("Note: %s\n" % note) if note else "", block)
+                section_fmt = "%s moved this client to: %s.\nYour next step: %s.\n%s\n%s"
+                section_args = (actor, STAGE_LABELS.get(new_c["stage"], new_c["stage"]), what or "-",
+                                ("Note: %s\n" % note) if note else "")
+                section = section_fmt % (section_args + (block,))
+                staff_section = section_fmt % (section_args + (staff_block,))
                 for role_ in roles:
                     box.to_role(role_, subject, section, STAGE_EMAIL_CC_ROLES.get(new_c["stage"], ()))
                 people = [p for p in people if p not in just_assigned]
                 if people:
-                    box.to_employees(people, subject, section)
+                    box.to_employees(people, subject, section, staff_section)
 
     # 2) Tasks: newly created tasks, and people added to an existing task.
     task_changes = []
@@ -3602,21 +3697,33 @@ def collect_notifications(con, action, d, before):
             lines.append("Details   : %s" % t["description"].strip())
         section = "%s assigned you a task.\n\n%s%s" % (actor, "\n".join(lines),
                                                       ("\n\n" + _client_lines(c)) if c else "")
-        box.to_employees(added, "iMatiz: task assigned to you — %s" % t["title"], section)
+        staff_section = "%s assigned you a task.\n\n%s%s" % (actor, "\n".join(lines),
+                                                            ("\n\n" + _client_lines(c, contact=False)) if c else "")
+        box.to_employees(added, "iMatiz: task assigned to you — %s" % t["title"], section, staff_section)
 
     # 3) Completed work sent to a coordinator / Technical TL / Technical Manager.
     for h in con.execute("""SELECT h.*, t.title FROM task_handoffs h JOIN tasks t ON t.id=h.task_id
                             WHERE h.id>? AND h.sent_by_key=?""",
                          (before.get("max_handoff") or 0, d.get("_principal_key") or "")).fetchall():
-        subject = "iMatiz: work sent to you for review — %s" % h["title"]
-        section = "%s sent you completed work to review.\n\nTask   : %s\nClient : %s\n%s" % (
-            h["sent_by_name"] or actor, h["title"], h["client_id"] or "-",
-            ("Note   : %s\n" % h["note"]) if (h["note"] or "").strip() else "")
+        hc = con.execute("SELECT * FROM clients WHERE id=?", (h["client_id"],)).fetchone() \
+            if h["client_id"] else None
+        work = _work_label(con, hc) if hc else ""
+        client_txt = ("%s (%s)" % (hc["name"], hc["display_id"] or hc["id"])) if hc else (h["client_id"] or "-")
+        files = []
+        if (h["file_data"] or "") and (h["file_name"] or ""):
+            files = [{"name": h["file_name"], "type": h["file_type"] or "", "data": h["file_data"]}]
+        subject = "iMatiz: work sent to you for review — %s%s" % (
+            h["title"], (" — %s" % hc["name"]) if hc else "")
+        section = "%s sent you completed work to review.\n\nTask    : %s\nClient  : %s\n%s%s%s" % (
+            h["sent_by_name"] or actor, h["title"], client_txt,
+            ("Work    : %s\n" % work) if work else "",
+            ("Note    : %s\n" % h["note"]) if (h["note"] or "").strip() else "",
+            ("Document: %s (attached)\n" % h["file_name"]) if files else "No document was attached.\n")
         if h["target"] in HANDOFF_TARGET_ROLES:
             for role_ in HANDOFF_TARGET_ROLES[h["target"]]:
-                box.to_role(role_, subject, section)
+                box.to_role(role_, subject, section, attachments=files)
         elif h["target_name"]:
-            box.to_employees([h["target_name"]], subject, section)
+            box.to_employees([h["target_name"]], subject, section, attachments=files)
     return box.flush()
 
 
@@ -6899,6 +7006,15 @@ def _handle_action_core(action, d, ip=""):
             employees_out = all_employees(con)
             if (d.get("role") or "") in ("client", "employee"):
                 employees_out = [scrub_employee(e) for e in employees_out]
+            elif (d.get("role") or "") in ("marketing_tl", "marketing_manager"):
+                # Marketing sees its own BDC team in full. Other teams (programmers, writers,
+                # journal team) only as a name + role - the demo scheduler needs the names
+                # - never their email, phone, DOB, branch, employee ID etc.
+                own = STAFF_MGMT_TEAM_ROLES.get(d.get("role"), ())
+                employees_out = [e if e["role"] in own else
+                                 {"id": e["id"], "name": e["name"], "role": e["role"],
+                                  "teamType": e.get("teamType", ""), "otherTeam": True}
+                                 for e in employees_out]
 
             caller_role = (d.get("role") or "")
             if caller_role == "employee":
@@ -9104,15 +9220,28 @@ def _handle_action_core(action, d, ip=""):
             return {"ok": True}
 
         if action == "assign_proofread_coordinator":
+            # The Journal Manager / TL can hand the paper to a Proofreading Coordinator (who
+            # then picks the proofreaders), or straight to one or more Proofreaders - with or
+            # without a coordinator - in which case proofreading starts immediately.
             c = get_client(con, d.get("clientId") or "")
             require_stage(c, "JOURNAL_MANAGER_REVIEW")
             name = (d.get("name") or "").strip()
-            if name not in active_names(con, "JOURNAL_EMPLOYEE", "PROOFREAD_COORDINATOR"):
+            if name and name not in active_names(con, "JOURNAL_EMPLOYEE", "PROOFREAD_COORDINATOR"):
                 raise ApiError("Unknown or inactive proofreading coordinator.")
+            valid = active_names(con, "JOURNAL_EMPLOYEE", "PROOFREADER")
+            asked = [str(p).strip() for p in (d.get("proofreaders") or []) if str(p).strip()]
+            bad = [p for p in asked if p not in valid]
+            if bad:
+                raise ApiError("Unknown or inactive proofreader: %s." % ", ".join(bad))
+            picked = list(dict.fromkeys(asked))
+            if not name and not picked:
+                raise ApiError("Pick a proofreading coordinator or at least one proofreader.")
             p_start, p_dl = _journal_assign_dates(d)
-            con.execute("UPDATE clients SET proofread_coordinator=?, proofread_start_date=?, proofread_deadline=? WHERE id=?",
-                        (name, p_start, p_dl, c["id"]))
-            move_stage(con, c["id"], "PROOFREAD_COORD_ASSIGNED", "Journal Manager")
+            con.execute("""UPDATE clients SET proofread_coordinator=?, assigned_proofreaders=?,
+                           proofread_start_date=?, proofread_deadline=? WHERE id=?""",
+                        (name, ",".join(picked), p_start, p_dl, c["id"]))
+            move_stage(con, c["id"], "PROOFREADING" if picked else "PROOFREAD_COORD_ASSIGNED",
+                       (d.get("actorLabel") or "Journal Manager").strip())
             con.commit()
             return {"ok": True}
 
@@ -9162,7 +9291,7 @@ def _handle_action_core(action, d, ip=""):
             if c["stage"] not in ("PROOFREADING", "PROOFREAD_RECHECK"):
                 require_stage(c, "PROOFREAD_RECHECK")
             note = (d.get("note") or "").strip()
-            actor = c["proofread_coordinator"] or "Proofreading Coordinator"
+            actor = c["proofread_coordinator"] or (d.get("empName") or "").strip() or "Proofreading team"
             if bool(d.get("approve")):
                 fname = _save_proofread_doc(con, c, d, actor, "Proofread (approved)", required=False)
                 move_stage(con, c["id"], "JOURNAL_MANAGER_FORMATTING", actor,
@@ -9177,15 +9306,26 @@ def _handle_action_core(action, d, ip=""):
             return {"ok": True}
 
         if action == "assign_format_coordinator":
+            # Same as proofreading: a Formatting Coordinator, or Formatters directly.
             c = get_client(con, d.get("clientId") or "")
             require_stage(c, "JOURNAL_MANAGER_FORMATTING")
             name = (d.get("name") or "").strip()
-            if name not in active_names(con, "JOURNAL_EMPLOYEE", "FORMAT_COORDINATOR"):
+            if name and name not in active_names(con, "JOURNAL_EMPLOYEE", "FORMAT_COORDINATOR"):
                 raise ApiError("Unknown or inactive formatting coordinator.")
+            valid = active_names(con, "JOURNAL_EMPLOYEE", "FORMATTER")
+            asked = [str(p).strip() for p in (d.get("formatters") or []) if str(p).strip()]
+            bad = [p for p in asked if p not in valid]
+            if bad:
+                raise ApiError("Unknown or inactive formatter: %s." % ", ".join(bad))
+            picked = list(dict.fromkeys(asked))
+            if not name and not picked:
+                raise ApiError("Pick a formatting coordinator or at least one formatter.")
             f_start, f_dl = _journal_assign_dates(d)
-            con.execute("UPDATE clients SET format_coordinator=?, format_start_date=?, format_deadline=? WHERE id=?",
-                        (name, f_start, f_dl, c["id"]))
-            move_stage(con, c["id"], "FORMATTING_ASSIGNED", "Journal Manager")
+            con.execute("""UPDATE clients SET format_coordinator=?, assigned_formatters=?,
+                           format_start_date=?, format_deadline=? WHERE id=?""",
+                        (name, ",".join(picked), f_start, f_dl, c["id"]))
+            move_stage(con, c["id"], "FORMATTING_IN_PROGRESS" if picked else "FORMATTING_ASSIGNED",
+                       (d.get("actorLabel") or "Journal Manager").strip())
             con.commit()
             return {"ok": True}
 
@@ -9217,7 +9357,8 @@ def _handle_action_core(action, d, ip=""):
             c = get_client(con, d.get("clientId") or "")
             require_stage(c, "FORMATTING_IN_PROGRESS")
             note = (d.get("note") or "").strip()
-            actorLabel = (d.get("actorLabel") or "").strip() or c["format_coordinator"] or "Formatting Coordinator"
+            actorLabel = (d.get("actorLabel") or "").strip() or c["format_coordinator"] or \
+                (d.get("empName") or "").strip() or "Formatting team"
             if bool(d.get("approve")):
                 move_stage(con, c["id"], "FORMATTING_MANAGER_REVIEW", actorLabel, note)
             else:
@@ -9233,6 +9374,11 @@ def _handle_action_core(action, d, ip=""):
             require_stage(c, "FORMATTING_MANAGER_REVIEW")
             note = (d.get("note") or "").strip()
             if bool(d.get("approve")):
+                # Optionally hand it to one Submission team member (blank = whole team).
+                sub = (d.get("submissionPerson") or "").strip()
+                if sub and sub not in active_names(con, "JOURNAL_EMPLOYEE", "SUBMISSION"):
+                    raise ApiError("Unknown or inactive Submission team member.")
+                con.execute("UPDATE clients SET submission_person=? WHERE id=?", (sub, c["id"]))
                 move_stage(con, c["id"], "SUBMISSION", "Journal Manager", note)
             else:
                 if not note:
